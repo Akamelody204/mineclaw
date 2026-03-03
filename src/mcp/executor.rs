@@ -12,6 +12,7 @@ use tracing::{debug, error, info};
 // ==================== ToolExecutor ====================
 
 /// 工具执行器
+#[derive(Clone)]
 pub struct ToolExecutor {
     /// 默认超时时间（毫秒）
     default_timeout: Duration,

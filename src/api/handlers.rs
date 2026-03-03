@@ -4,7 +4,6 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::llm::ChatMessage;
 use crate::models::*;
 use crate::state::AppState;
 
@@ -37,22 +36,21 @@ pub async fn send_message(
     let mut session = session;
     session.add_message(user_message);
 
-    let chat_messages: Vec<ChatMessage> = session
-        .messages
-        .iter()
-        .map(|m| ChatMessage::from((m.role.clone(), m.content.clone())))
-        .collect();
+    info!("Running tool coordinator");
+    let (assistant_response, intermediate_messages) = state
+        .tool_coordinator
+        .run(session.messages.clone())
+        .await?;
+    info!("Tool coordinator finished, intermediate_messages={}", intermediate_messages.len());
 
-    info!("Calling LLM provider");
-    let assistant_response = state.llm_provider.chat(chat_messages).await?;
-    info!("LLM response received");
+    // 添加中间消息（工具调用和结果，以及中间的 Assistant 消息）到会话
+    for msg in intermediate_messages {
+        session.add_message(msg);
+    }
 
-    let assistant_message = Message::new(
-        session.id,
-        MessageRole::Assistant,
-        assistant_response.clone(),
-    );
-    session.add_message(assistant_message);
+    // 注意：不再额外添加最终的助手回复
+    // 因为 ToolCoordinator 已经在 intermediate_messages 中包含了最终回复
+    // （当 LLM 只返回文本时，ToolCoordinator 会保存为 Assistant 消息）
 
     state.session_repo.update(session.clone()).await?;
 

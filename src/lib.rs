@@ -9,6 +9,7 @@ pub mod llm;
 pub mod mcp;
 pub mod models;
 pub mod state;
+pub mod tool_coordinator;
 
 pub use api::create_router;
 pub use config::Config;
@@ -16,6 +17,7 @@ pub use error::{Error, Result};
 pub use llm::create_provider;
 pub use models::SessionRepository;
 pub use state::AppState;
+pub use tool_coordinator::ToolCoordinator;
 
 // 方便的重导出
 pub mod prelude {

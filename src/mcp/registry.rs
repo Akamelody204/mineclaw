@@ -52,11 +52,10 @@ impl ToolRegistry {
 
         if let Some(tools) = self.server_tools.remove(server_name) {
             for tool in tools {
-                if let Some(registered_server) = self.tool_to_server.get(&tool.name) {
-                    if registered_server == server_name {
+                if let Some(registered_server) = self.tool_to_server.get(&tool.name)
+                    && registered_server == server_name {
                         self.tool_to_server.remove(&tool.name);
                     }
-                }
             }
         }
     }

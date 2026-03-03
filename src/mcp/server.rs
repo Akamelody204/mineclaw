@@ -168,11 +168,10 @@ impl McpServerManager {
         info!(server_name = name, "Stopping MCP server");
 
         if let Some(mut handle) = self.servers.remove(name) {
-            if let Some(mut client) = handle.client.take() {
-                if let Err(e) = client.close().await {
+            if let Some(mut client) = handle.client.take()
+                && let Err(e) = client.close().await {
                     warn!(server_name = name, error = %e, "Error while closing client");
                 }
-            }
             handle.status = ServerStatus::Error("Stopped".to_string());
         }
 
