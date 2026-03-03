@@ -25,3 +25,11 @@ temperature = 0.7
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-github"]
 # env = { "GITHUB_PERSONAL_ACCESS_TOKEN" = "${GITHUB_TOKEN}" }
+
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "test-server"
+command = "node"
+args = ["/mnt/WD/Programming/workspace/Rust/mineclaw/test-mcp-server.js"]
