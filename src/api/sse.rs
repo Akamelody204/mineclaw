@@ -98,6 +98,9 @@ pub async fn handle_stream_request(
     // 创建 SSE 通道
     let (sse_channel, receiver) = SseChannel::new();
 
+    // 立即发送会话开始事件
+    sse_channel.send(SseEvent::session_started(session_id.to_string()));
+
     // 获取会话
     let session = if let Some(session) = state.session_repo.get(&session_id).await {
         session
@@ -146,6 +149,7 @@ pub async fn handle_stream_request(
     } else {
         // 没有新内容，只发送一个 completed 事件说明会话已存在
         info!("No new content, session exists");
+        sse_channel.send(SseEvent::completed());
         // 这里不运行工具协调器，因为没有新的用户消息
         // 如果想要重放历史事件，需要额外的逻辑
     }

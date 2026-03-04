@@ -9,6 +9,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseEvent {
+    /// 会话开始
+    SessionStarted { session_id: String },
     /// 助手消息
     AssistantMessage { content: String },
     /// 工具调用
@@ -22,6 +24,13 @@ pub enum SseEvent {
 }
 
 impl SseEvent {
+    /// 创建会话开始事件
+    pub fn session_started(session_id: impl Into<String>) -> Self {
+        Self::SessionStarted {
+            session_id: session_id.into(),
+        }
+    }
+
     /// 创建助手消息事件
     pub fn assistant_message(content: impl Into<String>) -> Self {
         Self::AssistantMessage {
@@ -67,6 +76,16 @@ impl SseEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_session_started_serialization() {
+        let event = SseEvent::session_started("test-session-id");
+        let json = event.to_json().unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["type"], "session_started");
+        assert_eq!(parsed["session_id"], "test-session-id");
+    }
 
     #[test]
     fn test_assistant_message_serialization() {

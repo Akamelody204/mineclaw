@@ -267,6 +267,12 @@ impl ListToolsRequest {
     }
 }
 
+impl Default for ListToolsRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
