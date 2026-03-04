@@ -196,9 +196,8 @@ impl ChatMessage {
 
     /// 从 ChatToolCall 转换为 ToolCall
     pub fn chat_tool_call_to_tool_call(chat_call: &ChatToolCall) -> Result<ToolCall> {
-        let arguments = serde_json::from_str(&chat_call.function.arguments).map_err(|e| {
-            Error::Llm(format!("Failed to parse tool arguments: {}", e))
-        })?;
+        let arguments = serde_json::from_str(&chat_call.function.arguments)
+            .map_err(|e| Error::Llm(format!("Failed to parse tool arguments: {}", e)))?;
 
         Ok(ToolCall {
             id: chat_call.id.clone(),

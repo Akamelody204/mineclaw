@@ -77,7 +77,9 @@ impl ToolExecutor {
         tool_name: &str,
         arguments: Value,
     ) -> Result<ExecutionResult> {
-        let response = server_manager.call_tool(server_name, tool_name, arguments).await?;
+        let response = server_manager
+            .call_tool(server_name, tool_name, arguments)
+            .await?;
 
         // 转换为执行结果
         let result = ExecutionResult::from_response(response, tool_name.to_string());

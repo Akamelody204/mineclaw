@@ -1,8 +1,10 @@
 pub mod message;
 pub mod session;
+pub mod sse;
 
 pub use message::*;
 pub use session::*;
+pub use sse::*;
 
 use std::collections::HashMap;
 use std::sync::Arc;

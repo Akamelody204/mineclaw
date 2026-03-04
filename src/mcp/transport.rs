@@ -35,7 +35,11 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     /// 创建一个新的 stdio 传输层并启动子进程
-    pub async fn spawn(command: &str, args: &[String], env: &std::collections::HashMap<String, String>) -> Result<Self> {
+    pub async fn spawn(
+        command: &str,
+        args: &[String],
+        env: &std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
         info!(command, ?args, "Spawning MCP server process");
 
         let mut cmd = Command::new(command);
@@ -54,13 +58,15 @@ impl StdioTransport {
             Error::Mcp(format!("Failed to spawn server: {}", e))
         })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            Error::Mcp("Failed to capture stdin".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Mcp("Failed to capture stdin".to_string()))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            Error::Mcp("Failed to capture stdout".to_string())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Mcp("Failed to capture stdout".to_string()))?;
 
         let stdout_lines = BufReader::new(stdout).lines();
 
@@ -85,9 +91,10 @@ impl Transport for StdioTransport {
     async fn send(&mut self, message: &str) -> Result<()> {
         debug!(message, "Sending message to MCP server");
 
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            Error::Mcp("Transport is closed".to_string())
-        })?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| Error::Mcp("Transport is closed".to_string()))?;
 
         stdin.write_all(message.as_bytes()).await.map_err(|e| {
             error!(error = %e, "Failed to write to stdin");
@@ -109,9 +116,10 @@ impl Transport for StdioTransport {
     }
 
     async fn receive(&mut self) -> Result<String> {
-        let lines = self.stdout_lines.as_mut().ok_or_else(|| {
-            Error::Mcp("Transport is closed".to_string())
-        })?;
+        let lines = self
+            .stdout_lines
+            .as_mut()
+            .ok_or_else(|| Error::Mcp("Transport is closed".to_string()))?;
 
         debug!("Waiting for message from MCP server");
 
@@ -153,7 +161,7 @@ impl Transport for StdioTransport {
                     // Send SIGTERM (Unix) or terminate (Windows)
                     #[cfg(unix)]
                     {
-                        use tokio::signal::unix::{signal, SignalKind};
+                        use tokio::signal::unix::{SignalKind, signal};
                         if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                             let _ = child.start_kill();
                             tokio::select! {
@@ -275,7 +283,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_transport_send_receive() {
-        let mut transport = MockTransport::with_responses(vec!["response1".to_string(), "response2".to_string()]);
+        let mut transport =
+            MockTransport::with_responses(vec!["response1".to_string(), "response2".to_string()]);
 
         transport.send("request1").await.unwrap();
         let resp1 = transport.receive().await.unwrap();

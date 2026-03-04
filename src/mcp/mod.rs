@@ -14,4 +14,4 @@ pub use executor::{ExecutionResult, ToolExecutor};
 pub use protocol::*;
 pub use registry::ToolRegistry;
 pub use server::{McpServerHandle, McpServerManager, ServerStatus};
-pub use transport::{Transport, StdioTransport};
+pub use transport::{StdioTransport, Transport};

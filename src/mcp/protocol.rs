@@ -173,9 +173,7 @@ pub struct CallToolResponse {
 #[serde(tag = "type")]
 pub enum ToolResultContent {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "image")]
     Image {
         #[serde(rename = "mimeType")]
@@ -218,12 +216,21 @@ impl JsonRpcResponse {
     }
 
     /// 创建错误响应
-    pub fn error(id: RequestId, code: i32, message: String, data: Option<serde_json::Value>) -> Self {
+    pub fn error(
+        id: RequestId,
+        code: i32,
+        message: String,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message, data }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 }
@@ -339,7 +346,10 @@ mod tests {
 
         let serialized = serde_json::to_string(&response).unwrap();
         let json_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(json_value["tools"][0]["inputSchema"], json!({"type": "object"}));
+        assert_eq!(
+            json_value["tools"][0]["inputSchema"],
+            json!({"type": "object"})
+        );
     }
 
     #[test]
@@ -355,10 +365,7 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_notification() {
-        let notification = JsonRpcNotification::new(
-            "initialized".to_string(),
-            None,
-        );
+        let notification = JsonRpcNotification::new("initialized".to_string(), None);
 
         let serialized = serde_json::to_string(&notification).unwrap();
         let deserialized: JsonRpcNotification = serde_json::from_str(&serialized).unwrap();

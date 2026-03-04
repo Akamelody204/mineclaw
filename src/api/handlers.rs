@@ -1,8 +1,12 @@
 use axum::Json;
 use axum::extract::{Path, State};
-use tracing::info;
+use axum::response::sse::{Event, Sse};
+use futures_util::stream::Stream;
+use std::convert::Infallible;
+use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::api::sse;
 use crate::error::Result;
 use crate::models::*;
 use crate::state::AppState;
@@ -37,11 +41,12 @@ pub async fn send_message(
     session.add_message(user_message);
 
     info!("Running tool coordinator");
-    let (assistant_response, intermediate_messages) = state
-        .tool_coordinator
-        .run(session.messages.clone())
-        .await?;
-    info!("Tool coordinator finished, intermediate_messages={}", intermediate_messages.len());
+    let (assistant_response, intermediate_messages) =
+        state.tool_coordinator.run(session.messages.clone()).await?;
+    info!(
+        "Tool coordinator finished, intermediate_messages={}",
+        intermediate_messages.len()
+    );
 
     // 添加中间消息（工具调用和结果，以及中间的 Assistant 消息）到会话
     for msg in intermediate_messages {
@@ -135,4 +140,24 @@ pub async fn delete_session(
     info!("Delete session response sent");
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+// ==================== SSE Handlers ====================
+
+pub async fn send_message_stream(
+    State(state): State<AppState>,
+    Json(request): Json<SendMessageRequest>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    sse::send_message_stream(state, request).await
+}
+
+pub async fn session_stream(
+    State(state): State<AppState>,
+    Path(session_id_str): Path<String>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let session_id = Uuid::parse_str(&session_id_str).unwrap_or_else(|_| {
+        warn!("Invalid UUID in session stream request: {}", session_id_str);
+        Uuid::new_v4()
+    });
+    sse::session_stream(state, session_id).await
 }

@@ -35,7 +35,10 @@ impl ToolRegistry {
 
         // 更新工具到服务器的映射
         for tool in tools {
-            if let Some(existing_server) = self.tool_to_server.insert(tool.name.clone(), server_name.clone()) {
+            if let Some(existing_server) = self
+                .tool_to_server
+                .insert(tool.name.clone(), server_name.clone())
+            {
                 warn!(
                     tool_name = %tool.name,
                     old_server = %existing_server,
@@ -53,9 +56,10 @@ impl ToolRegistry {
         if let Some(tools) = self.server_tools.remove(server_name) {
             for tool in tools {
                 if let Some(registered_server) = self.tool_to_server.get(&tool.name)
-                    && registered_server == server_name {
-                        self.tool_to_server.remove(&tool.name);
-                    }
+                    && registered_server == server_name
+                {
+                    self.tool_to_server.remove(&tool.name);
+                }
             }
         }
     }

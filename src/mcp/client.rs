@@ -91,12 +91,15 @@ impl McpClient {
             Ok(json_rpc_response) => {
                 if let Some(error) = json_rpc_response.error {
                     error!(code = error.code, message = %error.message, "MCP request failed");
-                    return Err(Error::Mcp(format!("MCP error: {} ({})", error.message, error.code)));
+                    return Err(Error::Mcp(format!(
+                        "MCP error: {} ({})",
+                        error.message, error.code
+                    )));
                 }
 
-                let result = json_rpc_response.result.ok_or_else(|| {
-                    Error::Mcp("No result in response".to_string())
-                })?;
+                let result = json_rpc_response
+                    .result
+                    .ok_or_else(|| Error::Mcp("No result in response".to_string()))?;
 
                 let deserialized = serde_json::from_value(result).map_err(|e| {
                     error!(error = %e, "Failed to deserialize response");
@@ -142,9 +145,8 @@ impl McpClient {
         info!("Initializing MCP session");
 
         let request = InitializeRequest::new("mineclaw", "0.1.0");
-        let params = serde_json::to_value(request).map_err(|e| {
-            Error::Mcp(format!("Failed to serialize initialize request: {}", e))
-        })?;
+        let params = serde_json::to_value(request)
+            .map_err(|e| Error::Mcp(format!("Failed to serialize initialize request: {}", e)))?;
 
         let response: InitializeResponse = self.send_request("initialize", Some(params)).await?;
 
@@ -165,9 +167,8 @@ impl McpClient {
         debug!("Listing tools");
 
         let request = ListToolsRequest::new();
-        let params = serde_json::to_value(request).map_err(|e| {
-            Error::Mcp(format!("Failed to serialize list_tools request: {}", e))
-        })?;
+        let params = serde_json::to_value(request)
+            .map_err(|e| Error::Mcp(format!("Failed to serialize list_tools request: {}", e)))?;
 
         let response: ListToolsResponse = self.send_request("tools/list", Some(params)).await?;
 
@@ -177,13 +178,16 @@ impl McpClient {
     }
 
     /// 调用工具
-    pub async fn call_tool(&mut self, name: String, arguments: serde_json::Value) -> Result<CallToolResponse> {
+    pub async fn call_tool(
+        &mut self,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<CallToolResponse> {
         debug!(tool_name = %name, "Calling tool");
 
         let request = CallToolRequest { name, arguments };
-        let params = serde_json::to_value(request).map_err(|e| {
-            Error::Mcp(format!("Failed to serialize call_tool request: {}", e))
-        })?;
+        let params = serde_json::to_value(request)
+            .map_err(|e| Error::Mcp(format!("Failed to serialize call_tool request: {}", e)))?;
 
         let response: CallToolResponse = self.send_request("tools/call", Some(params)).await?;
 
@@ -238,7 +242,11 @@ mod tests {
                 }
             }
         });
-        transport.responses_to_receive.lock().await.push_back(initialize_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(initialize_response.to_string());
 
         // initialized 通知会被发送，但不需要响应
         let mut client = McpClient::new(Box::new(transport));
@@ -270,7 +278,11 @@ mod tests {
                 }
             }
         });
-        transport.responses_to_receive.lock().await.push_back(initialize_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(initialize_response.to_string());
 
         // 设置 list_tools 响应
         let list_tools_response = json!({
@@ -292,7 +304,11 @@ mod tests {
                 ]
             }
         });
-        transport.responses_to_receive.lock().await.push_back(list_tools_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(list_tools_response.to_string());
 
         let mut client = McpClient::new(Box::new(transport));
 
@@ -321,7 +337,11 @@ mod tests {
                 "message": "Method not found"
             }
         });
-        transport.responses_to_receive.lock().await.push_back(error_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(error_response.to_string());
 
         let mut client = McpClient::new(Box::new(transport));
 
@@ -351,7 +371,11 @@ mod tests {
                 }
             }
         });
-        transport.responses_to_receive.lock().await.push_back(initialize_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(initialize_response.to_string());
 
         // 设置 call_tool 响应
         let call_tool_response = json!({
@@ -367,7 +391,11 @@ mod tests {
                 "isError": false
             }
         });
-        transport.responses_to_receive.lock().await.push_back(call_tool_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(call_tool_response.to_string());
 
         let mut client = McpClient::new(Box::new(transport));
 
@@ -375,7 +403,9 @@ mod tests {
         client.initialize().await.unwrap();
 
         // 调用工具
-        let result = client.call_tool("echo".to_string(), json!({"message": "test"})).await;
+        let result = client
+            .call_tool("echo".to_string(), json!({"message": "test"}))
+            .await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -402,7 +432,11 @@ mod tests {
                 }
             }
         });
-        transport.responses_to_receive.lock().await.push_back(initialize_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(initialize_response.to_string());
 
         // 设置错误响应
         let error_response = json!({
@@ -413,7 +447,11 @@ mod tests {
                 "message": "Invalid params"
             }
         });
-        transport.responses_to_receive.lock().await.push_back(error_response.to_string());
+        transport
+            .responses_to_receive
+            .lock()
+            .await
+            .push_back(error_response.to_string());
 
         let mut client = McpClient::new(Box::new(transport));
 

@@ -96,16 +96,17 @@ impl McpServerManager {
         self.servers.insert(config.name.clone(), handle);
 
         // 启动传输层
-        let transport = match StdioTransport::spawn(&config.command, &config.args, &config.env).await {
-            Ok(t) => t,
-            Err(e) => {
-                error!(server_name = %config.name, error = %e, "Failed to spawn server");
-                if let Some(handle) = self.servers.get_mut(&config.name) {
-                    handle.status = ServerStatus::Error(e.to_string());
+        let transport =
+            match StdioTransport::spawn(&config.command, &config.args, &config.env).await {
+                Ok(t) => t,
+                Err(e) => {
+                    error!(server_name = %config.name, error = %e, "Failed to spawn server");
+                    if let Some(handle) = self.servers.get_mut(&config.name) {
+                        handle.status = ServerStatus::Error(e.to_string());
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         // 创建客户端
         let mut client = McpClient::new(Box::new(transport));
@@ -158,7 +159,8 @@ impl McpServerManager {
         }
 
         // 注册到工具注册表
-        self.tool_registry.register_server(config.name.clone(), tools);
+        self.tool_registry
+            .register_server(config.name.clone(), tools);
 
         Ok(())
     }
@@ -169,9 +171,10 @@ impl McpServerManager {
 
         if let Some(mut handle) = self.servers.remove(name) {
             if let Some(mut client) = handle.client.take()
-                && let Err(e) = client.close().await {
-                    warn!(server_name = name, error = %e, "Error while closing client");
-                }
+                && let Err(e) = client.close().await
+            {
+                warn!(server_name = name, error = %e, "Error while closing client");
+            }
             handle.status = ServerStatus::Error("Stopped".to_string());
         }
 
@@ -239,12 +242,13 @@ impl McpServerManager {
             "Calling tool"
         );
 
-        let handle = self.servers.get_mut(server_name).ok_or_else(|| {
-            Error::McpServer {
+        let handle = self
+            .servers
+            .get_mut(server_name)
+            .ok_or_else(|| Error::McpServer {
                 server: server_name.to_string(),
                 message: "Server not found".to_string(),
-            }
-        })?;
+            })?;
 
         if handle.status != ServerStatus::Connected {
             return Err(Error::McpServer {
@@ -253,11 +257,9 @@ impl McpServerManager {
             });
         }
 
-        let client = handle.client.as_mut().ok_or_else(|| {
-            Error::McpServer {
-                server: server_name.to_string(),
-                message: "Client not initialized".to_string(),
-            }
+        let client = handle.client.as_mut().ok_or_else(|| Error::McpServer {
+            server: server_name.to_string(),
+            message: "Client not initialized".to_string(),
         })?;
 
         let response = client.call_tool(tool_name.to_string(), arguments).await?;
