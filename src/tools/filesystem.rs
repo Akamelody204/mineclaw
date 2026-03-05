@@ -727,16 +727,25 @@ pub fn parse_search_replace_blocks_from_diff(diff: &str) -> Vec<(String, String)
             }
 
             // 移除开头和末尾的空行
-            while search_content.first().map_or(false, |l| l.trim().is_empty()) {
+            while search_content
+                .first()
+                .map_or(false, |l| l.trim().is_empty())
+            {
                 search_content.remove(0);
             }
             while search_content.last().map_or(false, |l| l.trim().is_empty()) {
                 search_content.pop();
             }
-            while replace_content.first().map_or(false, |l| l.trim().is_empty()) {
+            while replace_content
+                .first()
+                .map_or(false, |l| l.trim().is_empty())
+            {
                 replace_content.remove(0);
             }
-            while replace_content.last().map_or(false, |l| l.trim().is_empty()) {
+            while replace_content
+                .last()
+                .map_or(false, |l| l.trim().is_empty())
+            {
                 replace_content.pop();
             }
 
