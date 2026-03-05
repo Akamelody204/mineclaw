@@ -245,7 +245,7 @@ pub mod mock {
     #[async_trait]
     impl Transport for MockTransport {
         async fn send(&mut self, message: &str) -> Result<()> {
-            let mut is_closed = self.is_closed.lock().await;
+            let is_closed = self.is_closed.lock().await;
             if *is_closed {
                 return Err(Error::Mcp("Transport is closed".to_string()));
             }
@@ -256,7 +256,7 @@ pub mod mock {
         }
 
         async fn receive(&mut self) -> Result<String> {
-            let mut is_closed = self.is_closed.lock().await;
+            let is_closed = self.is_closed.lock().await;
             if *is_closed {
                 return Err(Error::Mcp("Transport is closed".to_string()));
             }
