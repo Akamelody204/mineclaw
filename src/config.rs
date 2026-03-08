@@ -42,6 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub filesystem: FilesystemConfig,
     #[serde(default)]
+    pub local_tools: LocalToolsConfig,
+    #[serde(default)]
     pub checkpoint: CheckpointConfig,
     #[serde(default = "default_agentfs_db_path")]
     pub agentfs_db_path: String,
@@ -111,6 +113,69 @@ impl Default for FilesystemConfig {
     }
 }
 
+/// 终端工具配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct TerminalConfig {
+    /// 是否启用终端工具
+    #[serde(default = "default_terminal_enabled")]
+    pub enabled: bool,
+    /// 最大输出字节数
+    #[serde(default = "default_terminal_max_output_bytes")]
+    pub max_output_bytes: usize,
+    /// 超时秒数
+    #[serde(default = "default_terminal_timeout_seconds")]
+    pub timeout_seconds: u64,
+    /// 允许的工作目录
+    #[serde(default)]
+    pub allowed_workspaces: Vec<String>,
+    /// 命令黑名单
+    #[serde(default)]
+    pub command_blacklist: Vec<String>,
+    /// 过滤规则
+    #[serde(default)]
+    pub filters: HashMap<String, Vec<String>>,
+}
+
+fn default_terminal_enabled() -> bool {
+    true
+}
+
+fn default_terminal_max_output_bytes() -> usize {
+    65536 // 64KB
+}
+
+fn default_terminal_timeout_seconds() -> u64 {
+    300 // 5分钟
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_terminal_enabled(),
+            max_output_bytes: default_terminal_max_output_bytes(),
+            timeout_seconds: default_terminal_timeout_seconds(),
+            allowed_workspaces: Vec::new(),
+            command_blacklist: Vec::new(),
+            filters: HashMap::new(),
+        }
+    }
+}
+
+/// 本地工具配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct LocalToolsConfig {
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+}
+
+impl Default for LocalToolsConfig {
+    fn default() -> Self {
+        Self {
+            terminal: TerminalConfig::default(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -128,6 +193,7 @@ impl Default for Config {
             },
             mcp: None,
             filesystem: FilesystemConfig::default(),
+            local_tools: LocalToolsConfig::default(),
             checkpoint: CheckpointConfig::default(),
             agentfs_db_path: default_agentfs_db_path(),
             encryption: None,
@@ -160,6 +226,36 @@ impl Config {
             .set_default("llm.temperature", default_config.llm.temperature)
             .map_err(crate::error::Error::Config)?
             .set_default("agentfs_db_path", default_config.agentfs_db_path)
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.enabled",
+                default_config.local_tools.terminal.enabled,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.max_output_bytes",
+                default_config.local_tools.terminal.max_output_bytes as u64,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.timeout_seconds",
+                default_config.local_tools.terminal.timeout_seconds,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.allowed_workspaces",
+                default_config.local_tools.terminal.allowed_workspaces,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.command_blacklist",
+                default_config.local_tools.terminal.command_blacklist,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.filters",
+                default_config.local_tools.terminal.filters,
+            )
             .map_err(crate::error::Error::Config)?;
 
         if config_path.exists() {

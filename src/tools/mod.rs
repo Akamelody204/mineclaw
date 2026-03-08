@@ -13,11 +13,13 @@ use std::sync::Arc;
 pub mod checkpoint;
 pub mod filesystem;
 pub mod registry;
+pub mod terminal;
 
 pub use self::checkpoint::{
     CheckpointTools, CreateCheckpointTool, DeleteCheckpointTool, ListCheckpointsTool,
     RestoreCheckpointTool,
 };
+pub use self::terminal::TerminalTool;
 pub use registry::LocalToolRegistry;
 
 // ==================== ToolContext ====================
