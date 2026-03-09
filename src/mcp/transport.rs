@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // ==================== Transport trait ====================
 
@@ -54,7 +54,7 @@ impl StdioTransport {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            error!(error = %e, "Failed to spawn MCP server");
+            warn!(error = %e, "Failed to spawn MCP server");
             Error::Mcp(format!("Failed to spawn server: {}", e))
         })?;
 

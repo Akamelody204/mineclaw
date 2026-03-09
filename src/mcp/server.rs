@@ -118,17 +118,19 @@ impl McpServerManager {
         self.servers.insert(config.name.clone(), handle);
 
         // 启动传输层
-        let transport =
-            match StdioTransport::spawn(&config.command, &config.args, &config.env).await {
-                Ok(t) => t,
-                Err(e) => {
-                    error!(server_name = %config.name, error = %e, "Failed to spawn server");
-                    if let Some(handle) = self.servers.get_mut(&config.name) {
-                        handle.status = ServerStatus::Error(e.to_string());
-                    }
-                    return Err(e);
+        let transport = match StdioTransport::spawn(&config.command, &config.args, &config.env)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                // 使用 warn 级别，因为这在测试环境中是预期的
+                tracing::warn!(server_name = %config.name, error = %e, "Failed to spawn server");
+                if let Some(handle) = self.servers.get_mut(&config.name) {
+                    handle.status = ServerStatus::Error(e.to_string());
                 }
-            };
+                return Err(e);
+            }
+        };
 
         // 创建客户端
         let mut client = McpClient::new(Box::new(transport));
@@ -358,9 +360,9 @@ impl Default for McpServerManager {
 impl Drop for McpServerManager {
     fn drop(&mut self) {
         // 因为 drop 不是 async，我们无法优雅地关闭服务器
-        // 只能记录警告
+        // 只能记录调试信息
         if !self.servers.is_empty() {
-            warn!(
+            debug!(
                 server_count = self.servers.len(),
                 "McpServerManager dropped with active servers, they may not be cleanly shut down"
             );

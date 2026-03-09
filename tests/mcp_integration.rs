@@ -9,8 +9,9 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_mcp_server_integration() {
+    // 在测试中使用 ERROR 级别，减少预期失败的日志噪音
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::ERROR)
         .try_init();
 
     // 从环境变量获取测试服务器路径，或使用默认路径
@@ -97,8 +98,9 @@ async fn test_mcp_server_manager_basics() {
 #[tokio::test]
 async fn test_mcp_tool_call_integration() {
     // 测试工具调用功能
+    // 在测试中使用 ERROR 级别，减少预期失败的日志噪音
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::ERROR)
         .try_init();
 
     let server_path = std::env::var("TEST_MCP_SERVER_PATH")
