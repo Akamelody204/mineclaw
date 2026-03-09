@@ -137,17 +137,15 @@ impl RunCommandTool {
             .iter()
             .any(|allowed_dir| cwd.starts_with(allowed_dir));
 
-        let normalized_allowed = context
+        // 如果原始路径或规范化路径有任何一个被允许，则允许
+        // 更安全的做法是：只有当规范化路径被允许时才允许
+        context
             .config
             .local_tools
             .terminal
             .allowed_workspaces
             .iter()
-            .any(|allowed_dir| normalized_cwd.starts_with(allowed_dir));
-
-        // 如果原始路径或规范化路径有任何一个被允许，则允许
-        // 更安全的做法是：只有当规范化路径被允许时才允许
-        normalized_allowed
+            .any(|allowed_dir| normalized_cwd.starts_with(allowed_dir))
     }
 
     /// 应用输出过滤规则
