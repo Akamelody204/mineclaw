@@ -11,6 +11,7 @@ pub mod error;
 pub mod llm;
 pub mod mcp;
 pub mod models;
+pub mod orchestrator;
 pub mod state;
 pub mod tool_coordinator;
 pub mod tools;
