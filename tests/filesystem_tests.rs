@@ -118,7 +118,12 @@ async fn test_list_directory() {
     for entry in entries {
         let path = entry["path"].as_str().unwrap();
         let name = entry["name"].as_str().unwrap();
-        assert_eq!(path, format!("{}/{}", temp_dir_name, name));
+        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
+        let expected_path = std::path::PathBuf::from(temp_dir_name.to_string())
+            .join(name)
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(path, expected_path);
     }
 
     // Test 2: List with absolute path - should return absolute paths
@@ -140,7 +145,12 @@ async fn test_list_directory() {
     for entry in entries {
         let path = entry["path"].as_str().unwrap();
         let name = entry["name"].as_str().unwrap();
-        assert_eq!(path, format!("{}/{}", temp_dir_str, name));
+        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
+        let expected_path = std::path::PathBuf::from(temp_dir_str.clone())
+            .join(name)
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(path, expected_path);
     }
 
     // Test 3: Recursive with relative path
@@ -166,7 +176,12 @@ async fn test_list_directory() {
         .unwrap();
     assert_eq!(
         nested_file["path"].as_str().unwrap(),
-        format!("{}/subdir/nested.txt", temp_dir_name)
+        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
+        std::path::PathBuf::from(temp_dir_name.to_string())
+            .join("subdir")
+            .join("nested.txt")
+            .to_string_lossy()
+            .to_string()
     );
 
     // Restore original directory

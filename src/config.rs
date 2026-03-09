@@ -163,18 +163,12 @@ impl Default for TerminalConfig {
 
 /// 本地工具配置
 #[derive(Debug, Deserialize, Clone)]
+#[derive(Default)]
 pub struct LocalToolsConfig {
     #[serde(default)]
     pub terminal: TerminalConfig,
 }
 
-impl Default for LocalToolsConfig {
-    fn default() -> Self {
-        Self {
-            terminal: TerminalConfig::default(),
-        }
-    }
-}
 
 impl Default for Config {
     fn default() -> Self {

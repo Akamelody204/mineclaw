@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
+use std::path::{Component, Path};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::Duration;
@@ -49,10 +50,44 @@ impl RunCommandTool {
         Self
     }
 
+    /// 规范化路径，处理 . 和 .. 等路径遍历字符
+    fn normalize_path(&self, raw: &str) -> String {
+        let is_absolute = Path::new(raw).has_root();
+        let mut components: Vec<&str> = Vec::new();
+
+        for component in Path::new(raw).components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if components.last() == Some(&"..") {
+                        components.push("..");
+                    } else if !components.is_empty() {
+                        components.pop();
+                    } else if !is_absolute {
+                        components.push("..");
+                    }
+                }
+                Component::Normal(segment) => {
+                    if let Some(s) = segment.to_str() {
+                        components.push(s);
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+
+        let joined = components.join("/");
+        if is_absolute {
+            format!("/{joined}")
+        } else {
+            joined
+        }
+    }
+
     /// 检查命令是否在黑名单中
     fn is_command_blacklisted(&self, command: &str, context: &ToolContext) -> bool {
         // 硬编码的黑名单
-        let hardcoded_blacklist = vec!["rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"];
+        let hardcoded_blacklist = ["rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"];
 
         // 检查硬编码黑名单
         if hardcoded_blacklist
@@ -90,14 +125,29 @@ impl RunCommandTool {
             return true;
         }
 
-        // 检查工作目录是否在允许的列表中
-        context
+        // 规范化路径，检测路径遍历
+        let normalized_cwd = self.normalize_path(cwd);
+
+        // 同时检查原始路径和规范化路径，防止路径遍历攻击
+        let _raw_allowed = context
             .config
             .local_tools
             .terminal
             .allowed_workspaces
             .iter()
-            .any(|allowed_dir| cwd.starts_with(allowed_dir))
+            .any(|allowed_dir| cwd.starts_with(allowed_dir));
+
+        let normalized_allowed = context
+            .config
+            .local_tools
+            .terminal
+            .allowed_workspaces
+            .iter()
+            .any(|allowed_dir| normalized_cwd.starts_with(allowed_dir));
+
+        // 如果原始路径或规范化路径有任何一个被允许，则允许
+        // 更安全的做法是：只有当规范化路径被允许时才允许
+        normalized_allowed
     }
 
     /// 应用输出过滤规则
@@ -173,13 +223,13 @@ impl crate::tools::LocalTool for RunCommandTool {
         }
 
         // 检查工作目录是否被允许
-        if let Some(cwd) = &params.cwd {
-            if !self.is_working_dir_allowed(cwd, &context) {
-                return Err(crate::error::Error::LocalToolExecution {
-                    tool: "run_command".to_string(),
-                    message: format!("Working directory not allowed: {}", cwd),
-                });
-            }
+        if let Some(cwd) = &params.cwd
+            && !self.is_working_dir_allowed(cwd, &context)
+        {
+            return Err(crate::error::Error::LocalToolExecution {
+                tool: "run_command".to_string(),
+                message: format!("Working directory not allowed: {}", cwd),
+            });
         }
 
         // 执行命令
@@ -194,7 +244,7 @@ impl crate::tools::LocalTool for RunCommandTool {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         let child_id = child.id().expect("Failed to get child process id");
 
         let timeout = Duration::from_secs(context.config.local_tools.terminal.timeout_seconds);
@@ -276,6 +326,12 @@ impl crate::tools::LocalTool for RunCommandTool {
 // ==================== 终端工具管理器 ====================
 
 pub struct TerminalTool;
+
+impl Default for TerminalTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TerminalTool {
     pub fn new() -> Self {
