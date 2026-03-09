@@ -1,9 +1,9 @@
-# MineClaw Phase 4 详细规划
+# MineClaw Phase 4: 多 Agent 基础架构 详细设计
 
 ## 概述
 
-### 阶段目标
-建立多 Agent 运行的基础框架，让单个 Agent 能够正常工作并支持基本管理。
+### 目标
+建立多 Agent 运行的基础框架，支持层级化总控架构、可嵌套子总控、上下文管理 Agent 的两种触发机制，以及复杂任务的两种执行模式。
 
 ### 执行原则
 严格按照 **Baby Steps™ 方法论**执行：
@@ -21,11 +21,15 @@
 - 🔌 **第三优先级：集成** - 与外部系统和协议集成
 
 ### 成功标准（Definition of Done）
-- 单个 Agent 可以完整执行任务（接收消息、调用 LLM、使用工具、返回响应）
-- Agent 状态机完整实现并验证
-- 消息总线可以在 Agent 间传递消息
+- 主总控可以创建和管理子总控（知道嵌套深度）
+- 子总控可以创建普通 Agent、更小的子总控或集群
+- Agent 可以主动向 CMA 发送求助工单
+- CMA 只在两种情况下触发：Agent 求助、上下文满载
+- 支持嵌套子总控接力模式（强依赖顺序场景）
+- 支持平行子总控集群模式（可并行分解场景）
+- 上下文管理 Agent 可以裁剪上下文、判断回退和转交
 - Session 与 Checkpoint 完整集成
-- 基础 API 可以管理 Agent 和 Session
+- 基础 API 可以管理总控和 Agent
 - 所有单元测试通过
 - 完整的文档和验收清单
 
@@ -37,60 +41,129 @@
 
 ## 关键设计决策
 
-### 1. Agent 模型：进程内多 Agent
-**决策**：采用进程内多 Agent 架构
+### 1. 架构模型：层级化总控 + 可嵌套子总控 + 单向流水线
 
-**原因**：
-- 简化调试和开发
-- 减少通信开销
-- 便于状态共享和管理
-- 可以在后续阶段轻松扩展为进程间架构
-
-**设计**：
-- 每个 Agent 运行在独立的 tokio task 中
-- 通过消息总线进行通信
-- 共享的应用状态通过 Arc<Mutex> 或 Arc<RwLock> 保护
-
-### 2. 消息总线：tokio::sync::mpsc + broadcast
-**决策**：使用 tokio 标准库的 mpsc 和 broadcast channel
-
-**原因**：
-- 轻量级、高性能
-- 与 tokio 运行时完美集成
-- 足够满足 Phase 4 的需求
-- 可以在需要时轻松替换为更复杂的方案
-
-**设计**：
-- 点对点通信：使用 mpsc::channel
-- 广播通信：使用 broadcast::channel（可选，Phase 4 可能不需要）
-- 消息确认：通过单独的响应 channel 实现
-
-### 3. Agent 状态机设计
-
-**状态定义**：
+**核心架构**：
 ```
-Idle（空闲）
-  ↓ [任务分配]
-Busy（忙碌）
-  ↓ [任务完成/出错]
-Idle / Error
-  ↓ [错误恢复]
-Idle
-
-Paused（暂停）- 可从任何状态进入
-  ↓ [恢复]
-原状态
+主总控 (Master Orchestrator) - 最顶层，唯一
+    │
+    ├── 子总控 1 (Sub-Orchestrator, Level 1)
+    │   ├── 可以创建：普通 Agent
+    │   ├── 可以创建：更小的子总控 (Level 2，如需要)
+    │   └── 可以创建：集群（并行执行多个 Agent）
+    │
+    ├── 子总控 2 (Sub-Orchestrator, Level 1)
+    │   └── ...
+    │
+    └── 上下文管理 Agent (Context Manager Agent, CMA)
+            ↓
+       独立监控所有 Agent
 ```
 
-**状态转换规则**：
-- Idle → Busy：分配新任务
-- Busy → Idle：任务成功完成
-- Busy → Error：任务执行出错
-- Error → Idle：错误恢复成功
-- 任何状态 → Paused：暂停指令
-- Paused → 原状态：恢复指令
+**设计原则**：
+- **单向流水线**：流水线是线性的，不支持 Agent 间通信
+- **总控协调**：只有总控知道有哪些 Agent 存在
+- **直接调用**：总控通过直接函数调用给 Agent 分配任务
+- **并行支持**：多个 Agent 可以并行工作（通过 tokio task）
+- **嵌套深度**：子总控知道自己的嵌套深度 (Level N)
+- **软性限制**：提示词劝阻过深嵌套，但不硬性限制（保持灵活性）
 
-### 4. 与现有代码的集成策略
+### 2. Agent 模型：无状态的执行者 + 可嵌套总控
+
+**Agent 的定位**：
+- **普通执行 Agent**：是"工人"，无状态
+  - 不保存对话历史（对话历史属于 Session）
+  - 不知道其他 Agent 的存在
+  - 只通过总控接收任务
+  - 可以主动向 CMA 发送求助工单
+
+- **子总控**：是"中层管理者"
+  - 知道自己的嵌套深度 (Level N)
+  - 可以创建普通 Agent、更小的子总控或集群
+  - 完成任务后写工单交回给父总控
+  - 提示词会软性劝阻过深嵌套
+
+- **主总控**：是"最高管理者"
+  - 最顶层的唯一总控
+  - 负责初始路由决策
+  - 管理所有子总控的生命周期
+  - 根据任务性质选择执行模式
+
+**上下文管理 Agent (CMA)**：是"监军"
+- 独立监控所有 Agent
+- 只有两个触发点：Agent 主动求助、上下文满载
+- 决定回退和转交，但不直接执行
+- 收到求助后通知当前层级的总控执行
+
+### 3. 通信方式：直接函数调用
+
+**决策**：总控和 Agent 之间通过直接函数调用通信
+
+**理由**：
+- 简单直接，不需要消息总线
+- 性能好，没有序列化/反序列化开销
+- 调试方便，调用栈清晰
+- 类型安全，编译时检查
+
+**并发支持**：
+- 每个 Agent 任务运行在独立的 tokio task 中
+- 多个 Agent 可以并行执行
+- 通过 JoinHandle 管理并发任务
+
+### 4. 工单机制：作为 User Message
+
+**决策**：接力转交时的工单直接作为 User Message
+
+**设计**：
+- 工单 = User Message（JSON 格式）
+- System Prompt 保持独立
+- 工单格式简洁聚焦
+- 包含：已完成部分、相关文件、下一阶段计划
+
+**工单传递**：
+- 子总控完成后写工单交回给父总控
+- 接力转交时，新 Agent 用工单作为 User Message
+
+### 5. 复杂任务的两种执行模式
+
+**模式 A：嵌套子总控接力模式**
+- **适用场景**：复杂任务，各步骤之间强依赖顺序，每一步都很复杂
+- **执行流程**：主总控 → 子总控 1 → 工单 → 主总控 → 子总控 2 → ...
+- **示例**：主总控 → (总控1→集群→总控1写工单→主总控) → (主总控更新计划后创建新总控2→集群)...
+
+**模式 B：平行子总控集群模式**
+- **适用场景**：复杂任务，但各部分可以分别独立执行
+- **执行流程**：主总控 → 同时创建多个子总控并行执行 → 汇总结果
+- **示例**：主总控 → (总控1, 总控2... 计划后创建 → Agent/集群 Agents)...
+
+### 6. 上下文管理 Agent (CMA) 的触发机制
+
+**只有两个触发点**：
+
+**触发点 1：普通 Agent 主动求助（Worker → CMA）**
+- 普通 Agent 发现自己持续犯错 → 生成"求助工单"
+- 求助工单直接发送给 CMA（不是主总控！）
+- CMA 分析后决定回退和转交，通知总控执行
+
+**触发点 2：上下文满载（唯一的自动触发点）**
+- 检测到：当前上下文长度 ≥ 阈值（如 90%）
+- 自动触发：CMA 进行清理
+- 清理后判断：是否在持续犯错？
+  - 是 → 触发回退 + 转交
+  - 否 → 继续执行
+- 其他情况不自动触发，因为每次输入的上下文通常很长
+
+### 7. 文件并发：避免冲突
+
+**原则**：多个 Agent 并行工作时，不会出现修改同一文件的情况
+
+**实现方式**：
+- 总控分配任务时明确划分文件范围
+- 每个 Agent 只操作分配给自己的文件
+- 通过约定接口避免冲突
+- Checkpoint 系统确保状态一致性
+
+### 8. 与现有代码的集成策略
 
 **复用现有组件**：
 - LLM 客户端（src/llm/）- 完全复用
@@ -98,12 +171,13 @@ Paused（暂停）- 可从任何状态进入
 - 本地工具（src/tools/）- 完全复用
 - Checkpoint 系统（src/checkpoint/）- 增强集成
 - Session 模型（src/models/session.rs）- 增强
+- ToolCoordinator（src/tool_coordinator.rs）- 完全复用
 
 **新增组件**：
-- Agent 定义与管理（src/agent/）
-- 消息总线（src/message_bus/）
+- Agent 定义（src/agent/）
+- 总控（src/orchestrator/）- 支持嵌套子总控
+- 上下文管理（src/context_manager/）- 两种触发机制
 - 工具掩码（src/tool_mask/）
-- 上下文管理（src/context_manager/）
 
 ---
 
@@ -113,23 +187,18 @@ Paused（暂停）- 可从任何状态进入
 
 ## 🎯 第一优先级：核心基础设施
 
-### Phase 4.1: Agent 基础定义与生命周期管理
+### Phase 4.1: Agent 基础定义（支持嵌套深度）
 
 #### 任务清单
 - [ ] 定义 AgentId 类型（新type 包装 Uuid）
-- [ ] 定义 AgentRole 枚举（通用 Agent、上下文管理 Agent、总控 Agent 等）
+- [ ] 定义 AgentRole 枚举（更新为新架构）
 - [ ] 定义 AgentCapability 标签系统
 - [ ] 定义 LLM 配置结构
-- [ ] 定义 AgentState 枚举（Idle, Busy, Error, Paused）
-- [ ] 定义 Agent 核心数据结构
+- [ ] 定义 AgentState 枚举
+- [ ] 定义 Agent 核心数据结构（支持嵌套深度）
 - [ ] 定义 AgentConfig 配置结构
-- [ ] 实现 Agent 仓库（存储和管理所有 Agent 实例）
-- [ ] 实现 Agent 创建流程
-- [ ] 实现 Agent 初始化流程
-- [ ] 实现状态转换验证逻辑
-- [ ] 实现健康检查机制
-- [ ] 实现错误恢复机制
-- [ ] 实现优雅关闭流程
+- [ ] 实现 Agent 执行函数（接收任务，返回结果）
+- [ ] 实现 Agent 求助功能（发送工单给 CMA）
 - [ ] 编写单元测试
 - [ ] 验证验收清单
 
@@ -143,7 +212,7 @@ Paused（暂停）- 可从任何状态进入
 
 **AgentRole**
 - 枚举类型，定义 Agent 的角色
-- 初始值：GeneralPurpose, ContextManager, Orchestrator
+- 值：MasterOrchestrator, SubOrchestrator, Worker, ContextManager
 - 可扩展
 - 实现 Display、Debug、Clone、PartialEq、Eq
 
@@ -163,16 +232,18 @@ Paused（暂停）- 可从任何状态进入
 - Idle: 空闲，可接受任务
 - Busy: 忙碌，正在执行任务
 - Error: 错误状态，包含错误信息
-- Paused: 暂停状态，记录暂停前的状态
+- RequestingHelp: 正在向 CMA 求助
 
-**Agent**
+**Agent（核心结构）**
 - id: AgentId
 - name: String（人类可读名称）
 - role: AgentRole
-- capabilities: Vec<AgentCapability>
+- capabilities: Vec<String>
 - llm_config: LlmConfig
 - state: AgentState
-- system_prompt: Option<String>
+- system_prompt: String
+- nested_depth: Option<u8>（嵌套深度，仅 SubOrchestrator 有）
+- parent_orchestrator_id: Option<AgentId>（父总控 ID，仅 SubOrchestrator 有）
 - created_at: DateTime<Utc>
 - updated_at: DateTime<Utc>
 
@@ -181,13 +252,36 @@ Paused（暂停）- 可从任何状态进入
 - role: AgentRole
 - capabilities: Vec<String>
 - llm_config: LlmConfig
-- system_prompt: Option<String>
+- system_prompt: String
+- nested_depth: Option<u8>
+- parent_orchestrator_id: Option<AgentId>
 
-**AgentRepository**
-- 存储所有 Agent 实例
-- 支持 CRUD 操作
-- 线程安全
-- 支持按 ID、角色、能力查询
+**AgentTask**
+- agent_id: AgentId
+- session_id: SessionId
+- user_message: String（包含工单，如果是转交）
+- tools: Option<Vec<String>>（可用工具列表）
+- checkpoint_id: Option<CheckpointId>
+
+**AgentTaskResult**
+- success: bool
+- agent_id: AgentId
+- session_id: SessionId
+- response: String
+- tool_calls: Vec<ToolCallRecord>
+- error: Option<String>
+- execution_time_ms: u64
+- new_checkpoint_id: Option<CheckpointId>
+
+**HelpRequest（Agent 求助工单）**
+- requester_agent_id: AgentId
+- session_id: SessionId
+- task_description: String
+- attempts_made: Vec<String>
+- failure_count: u32
+- error_messages: Vec<String>
+- suggested_checkpoint_id: Option<CheckpointId>
+- created_at: DateTime<Utc>
 
 #### API 设计
 
@@ -197,196 +291,243 @@ Paused（暂停）- 可从任何状态进入
 - 验证配置有效性
 - 生成唯一 ID
 - 初始化状态为 Idle
-- 保存到仓库
+- 如果是 SubOrchestrator，设置 nested_depth
+
+**Agent 执行任务**
+- 输入：Agent, AgentTask
+- 输出：Result<AgentTaskResult, Error>
+- 这是一个 async 函数
+- 内部调用 LLM、使用工具
+- 更新 Agent 状态（Busy → Idle/Error）
+- 创建新的 Checkpoint（如果需要）
+
+**Agent 发送求助**
+- 输入：Agent, HelpRequest
+- 输出：Result<(), Error>
+- 将求助工单发送给 CMA
+- 更新 Agent 状态为 RequestingHelp
 
 **Agent 状态查询**
-- 输入：AgentId
-- 输出：Result<AgentState, Error>
-
-**Agent 完整信息查询**
-- 输入：AgentId
-- 输出：Result<Agent, Error>
-
-**Agent 列表查询**
-- 输入：可选过滤条件（角色、能力、状态）
-- 输出：Result<Vec<Agent>, Error>
-
-**Agent 状态更新**
-- 输入：AgentId, 新状态
-- 输出：Result<(), Error>
-- 验证状态转换的合法性
-
-**Agent 删除**
-- 输入：AgentId
-- 输出：Result<(), Error>
-- 确保 Agent 不在 Busy 状态
-- 清理相关资源
-
-**健康检查**
-- 输入：AgentId
-- 输出：Result<HealthStatus, Error>
-- HealthStatus: Healthy, Unhealthy, Unknown
+- 输入：Agent
+- 输出：AgentState
 
 #### 测试策略
 - 单元测试：所有数据结构和基础操作
-- 状态机测试：验证所有合法和非法的状态转换
-- 并发测试：验证多线程环境下的仓库安全性
+- 单元测试：嵌套深度设置和验证
+- 单元测试：求助功能
+- 集成测试：Agent 执行任务的端到端流程
 - 错误处理测试：验证各种错误场景的处理
 
 #### 验收标准
 - [ ] 可以创建 Agent 并分配唯一 ID
-- [ ] Agent 状态机所有合法转换都能正常工作
-- [ ] 非法状态转换被正确拒绝
-- [ ] 可以查询 Agent 列表和详情
-- [ ] 可以按角色、能力、状态过滤 Agent
-- [ ] 可以更新 Agent 状态
-- [ ] 可以删除空闲状态的 Agent
-- [ ] 不能删除忙碌状态的 Agent
-- [ ] 健康检查机制正常工作
+- [ ] Agent 配置验证正常工作
+- [ ] SubOrchestrator 可以正确设置嵌套深度
+- [ ] Agent 可以接收任务
+- [ ] Agent 可以调用 LLM
+- [ ] Agent 可以使用工具
+- [ ] Agent 可以返回响应
+- [ ] Agent 状态正确更新
+- [ ] Agent 可以发送求助工单给 CMA
+- [ ] 错误处理正常工作
 - [ ] 所有单元测试通过
-- [ ] 并发测试通过
+- [ ] 集成测试通过
 
 ---
 
-### Phase 4.2: 消息总线基础
+### Phase 4.2: 总控机制（支持嵌套子总控）
 
 #### 任务清单
-- [ ] 定义 MessageId 类型
-- [ ] 定义 MessageType 枚举
-- [ ] 定义 Message 核心结构
-- [ ] 定义 MessagePayload trait
-- [ ] 实现消息序列化和反序列化
-- [ ] 实现消息 ID 生成器
-- [ ] 定义点对点消息通道
-- [ ] 实现消息发送机制
-- [ ] 实现消息接收机制
-- [ ] 实现消息确认机制
-- [ ] 实现超时处理
-- [ ] 实现基础的错误重试
-- [ ] 定义 MessageBus 中央协调器
-- [ ] 编写单元测试
-- [ ] 验证验收清单
+- [ ] 定义 OrchestratorId 类型
+- [ ] 定义 OrchestratorRole 枚举（更新为新架构）
+- [ ] 定义 Orchestrator 核心数据结构（支持嵌套）
+- [ ] 定义 OrchestratorConfig 配置结构
+- [ ] 实现 Agent 仓库（总控管理的 Agent 列表）
+- [ ] 实现 Agent 创建功能（支持创建子总控）
+- [ ] 实现任务分配功能（串行）
+- [ ] 实现任务分配功能（并行）
+- [ ] 实现结果回收功能
+- [ ] 实现工单生成和处理
+- [ ] 实现 Session 与 Agent 的关联
+- [ ] 实现 CMA 通知处理（回退和转交）
+- 编写单元测试
+- 验证验收清单
 
 #### 数据结构设计
 
-**MessageId**
-- 唯一标识消息
+**OrchestratorId**
+- 唯一标识总控
 - 使用 Uuid v4
-- 支持序列化和反序列化
 - 实现 Display、Debug、Clone、Copy、PartialEq、Eq、Hash
 
-**MessageType**
-- 枚举类型，定义消息类型
-- 初始值：TaskRequest, TaskResponse, Heartbeat, SystemNotification, Error
-- 可扩展
+**OrchestratorRole**
+- Master: 主总控
+- Sub: 子总控
 
-**MessagePriority**
-- 枚举类型，定义消息优先级
-- 值：Low, Normal, High, Critical
-- 默认：Normal
-
-**Message**
-- id: MessageId
-- message_type: MessageType
-- priority: MessagePriority
-- from: Option<AgentId>（None 表示系统）
-- to: Option<AgentId>（None 表示广播）
-- payload: Vec<u8>（序列化的 payload）
+**Orchestrator**
+- id: OrchestratorId
+- name: String
+- role: OrchestratorRole
+- agent: Agent（总控本身也是一个 Agent）
+- nested_depth: u8（嵌套深度，Master 为 0）
+- parent_orchestrator_id: Option<OrchestratorId>（父总控 ID）
+- managed_agents: HashMap<AgentId, Agent>
+- active_tasks: HashMap<TaskId, JoinHandle<Result<AgentTaskResult, Error>>>
+- session_id: Option<SessionId>
 - created_at: DateTime<Utc>
-- expires_at: Option<DateTime<Utc>>
-- correlation_id: Option<MessageId>（用于关联请求-响应）
+- updated_at: DateTime<Utc>
 
-**TaskRequestPayload**
-- task_description: String
-- context: Option<Vec<u8>>
-- tools: Option<Vec<String>>
-- deadline: Option<DateTime<Utc>>
+**OrchestratorConfig**
+- name: String
+- role: OrchestratorRole
+- agent_config: AgentConfig（总控自己的 Agent 配置）
+- nested_depth: u8
+- parent_orchestrator_id: Option<OrchestratorId>
 
-**TaskResponsePayload**
-- success: bool
-- result: Option<Vec<u8>>
-- error: Option<String>
-- execution_time_ms: u64
+**TaskId**
+- 唯一标识任务
+- 使用 Uuid v4
 
-**HeartbeatPayload**
-- status: AgentState
-- timestamp: DateTime<Utc>
+**TaskAssignment**
+- task_id: TaskId
+- agent_id: AgentId
+- task: AgentTask
+- assigned_at: DateTime<Utc>
 
-**MessageBus**
-- 中央消息协调器
-- 维护所有 Agent 的消息通道
-- 路由消息到目标 Agent
-- 管理消息超时和重试
+**ParallelTasks**
+- task_id: TaskId
+- assignments: Vec<TaskAssignment>
+- wait_for_all: bool（是否等待所有任务完成）
+
+**WorkOrder（工单）**
+- completed_work: String（已完成部分详细标注）
+- related_files: Vec<String>（相关文件的相对路径列表）
+- next_stage_plan: String（下一阶段的详细计划）
+- created_by: OrchestratorId
+- created_at: DateTime<Utc>
+
+**CmaNotification（CMA 通知）**
+- notification_type: CmaNotificationType
+- session_id: SessionId
+- target_orchestrator_id: OrchestratorId
+- checkpoint_id: Option<CheckpointId>
+- reason: String
+- created_at: DateTime<Utc>
+
+**CmaNotificationType**
+- RollbackAndHandover: 回退并转交
+- ContextTrimmed: 上下文已裁剪
 
 #### API 设计
 
-**消息创建**
-- 输入：MessageType, 优先级, 发送者, 接收者, payload
-- 输出：Message
-- 自动生成 MessageId 和时间戳
+**总控创建**
+- 输入：OrchestratorConfig
+- 输出：Result<Orchestrator, Error>
+- 创建总控自己的 Agent
+- 初始化空的 Agent 仓库
+- 如果是子总控，设置 nested_depth
 
-**消息发送**
-- 输入：Message
-- 输出：Result<MessageId, Error>
-- 验证消息有效性
-- 路由到目标接收者
-- 返回消息 ID
+**总控创建 Agent**
+- 输入：mut Orchestrator, AgentConfig
+- 输出：Result<(Orchestrator, Agent), Error>
+- 创建 Agent
+- 如果创建的是子总控，自动设置 nested_depth = 当前深度 + 1
+- 添加到总控的 managed_agents
+- 返回更新后的总控和新 Agent
 
-**消息接收**
-- 输入：AgentId, 可选超时时间
-- 输出：Result<Option<Message>, Error>
-- 非阻塞，如果没有消息返回 None
-- 支持超时等待
+**总控列出 Agent**
+- 输入：&Orchestrator
+- 输出：Vec<&Agent>
+- 返回所有管理的 Agent
 
-**消息确认**
-- 输入：MessageId
-- 输出：Result<(), Error>
-- 标记消息为已处理
+**总控获取 Agent**
+- 输入：&Orchestrator, AgentId
+- 输出：Option<&Agent>
 
-**消息订阅（点对点）**
-- 输入：AgentId
-- 输出：Result<Receiver<Message>, Error>
-- 为 Agent 创建消息接收通道
+**总控移除 Agent**
+- 输入：mut Orchestrator, AgentId
+- 输出：Result<Orchestrator, Error>
+- 确保 Agent 不在 Busy 状态
+- 从 managed_agents 中移除
 
-**消息取消订阅**
-- 输入：AgentId
-- 输出：Result<(), Error>
-- 清理 Agent 的消息通道
+**总控分配任务（串行）**
+- 输入：mut Orchestrator, AgentId, AgentTask
+- 输出：Result<(Orchestrator, AgentTaskResult), Error>
+- 直接调用 Agent::execute_task
+- 等待结果返回
+- 更新总控状态
 
-**消息查询（已发送但未确认）**
-- 输入：AgentId
-- 输出：Result<Vec<Message>, Error>
+**总控分配任务（并行）**
+- 输入：mut Orchestrator, ParallelTasks
+- 输出：Result<(Orchestrator, TaskId), Error>
+- 为每个任务创建 tokio task
+- 存储 JoinHandle 到 active_tasks
+- 返回 TaskId，不等待结果
 
-**发送请求并等待响应**
-- 输入：请求消息, 超时时间
-- 输出：Result<Message, Error>
-- 封装请求-响应模式
-- 自动处理 correlation_id
-- 超时后返回错误
+**总控查询任务状态**
+- 输入：&Orchestrator, TaskId
+- 输出：Option<TaskStatus>
+- TaskStatus: Pending, Running, Completed, Failed
+
+**总控等待任务完成**
+- 输入：mut Orchestrator, TaskId
+- 输出：Result<(Orchestrator, Vec<AgentTaskResult>), Error>
+- 等待 JoinHandle 完成
+- 清理 active_tasks
+- 返回所有结果
+
+**总控取消任务**
+- 输入：mut Orchestrator, TaskId
+- 输出：Result<Orchestrator, Error>
+- abort JoinHandle
+- 清理 active_tasks
+
+**总控生成工单**
+- 输入：&Orchestrator, WorkOrder
+- 输出：Result<String, Error>
+- 序列化为 JSON 字符串，作为 User Message
+
+**总控处理 CMA 通知**
+- 输入：mut Orchestrator, CmaNotification
+- 输出：Result<Orchestrator, Error>
+- 如果是 RollbackAndHandover：
+  - 回退到指定 Checkpoint
+  - 创建新 Agent 进行转交
+- 如果是 ContextTrimmed：
+  - 记录上下文已裁剪
+  - 继续执行
+
+**总控关联 Session**
+- 输入：mut Orchestrator, SessionId
+- 输出：Orchestrator
 
 #### 测试策略
-- 单元测试：消息创建、序列化、反序列化
-- 集成测试：两个 Agent 之间的通信
-- 超时测试：验证消息超时机制
-- 重试测试：验证错误重试逻辑
-- 并发测试：多 Agent 同时发送消息
-- 压力测试：大量消息的处理能力
+- 单元测试：总控 CRUD 操作
+- 单元测试：Agent 管理（包括创建子总控）
+- 单元测试：嵌套深度管理
+- 单元测试：工单生成
+- 单元测试：CMA 通知处理
+- 集成测试：串行任务分配
+- 集成测试：并行任务分配
+- 并发测试：多个并行任务的正确性
 
 #### 验收标准
-- [ ] 可以创建消息并自动生成唯一 ID
-- [ ] 消息可以正确序列化和反序列化
-- [ ] Agent 可以订阅消息通道
-- [ ] 点对点消息可以正确传递
-- [ ] 消息确认机制正常工作
-- [ ] 超时机制正常工作
-- [ ] 请求-响应模式正常工作
-- [ ] 消息优先级被正确处理
-- [ ] 过期消息被正确处理
-- [ ] 可以查询未确认的消息
-- [ ] Agent 可以取消订阅
-- [ ] 并发消息传递正常工作
+- [ ] 可以创建主总控和子总控
+- [ ] 子总控的嵌套深度正确设置
+- [ ] 总控可以创建 Agent（包括子总控）
+- [ ] 总控可以列出和查询 Agent
+- [ ] 总控可以移除空闲 Agent
+- [ ] 总控不能移除忙碌 Agent
+- [ ] 总控可以串行分配任务
+- [ ] 总控可以并行分配任务
+- [ ] 总控可以查询任务状态
+- [ ] 总控可以等待任务完成
+- [ ] 总控可以取消任务
+- [ ] 总控可以生成工单
+- [ ] 总控可以处理 CMA 通知
+- [ ] 多个并行任务正常工作
 - [ ] 所有单元测试通过
 - [ ] 集成测试通过
+- [ ] 并发测试通过
 
 ---
 
@@ -396,13 +537,13 @@ Paused（暂停）- 可从任何状态进入
 - [ ] 回顾现有的 Checkpoint 实现
 - [ ] 回顾现有的 Session 模型
 - [ ] 定义 SessionState 枚举
-- [ ] 增强 Session 结构（关联 Agent）
+- [ ] 增强 Session 结构（关联总控）
 - [ ] 定义 Session 生命周期事件
 - [ ] 实现 Session 创建流程
 - [ ] 实现 Session 激活流程
 - [ ] 实现 Session 归档流程
 - [ ] 实现 Session 删除流程
-- [ ] 实现 Session 与 Agent 的关联
+- [ ] 实现 Session 与总控的关联
 - [ ] 实现 Session 与 Checkpoint 的强关联
 - [ ] 定义 Checkpoint 归档策略
 - [ ] 实现 Checkpoint 跟随 Session 生命周期
@@ -428,7 +569,7 @@ Paused（暂停）- 可从任何状态进入
 - created_at: DateTime<Utc>（现有）
 - updated_at: DateTime<Utc>（现有）
 - state: SessionState（新增）
-- agent_id: Option<AgentId>（新增，关联的 Agent）
+- orchestrator_id: Option<OrchestratorId>（新增，关联的总控）
 - current_checkpoint_id: Option<CheckpointId>（新增）
 - archived_at: Option<DateTime<Utc>>（新增）
 - metadata: HashMap<String, String>（新增，灵活的元数据）
@@ -448,7 +589,7 @@ Paused（暂停）- 可从任何状态进入
 - 存储所有 Session 实例
 - 支持 CRUD 操作
 - 支持按状态查询
-- 支持按 Agent 查询
+- 支持按总控查询
 - 线程安全
 
 **CheckpointArchivingStrategy**
@@ -459,7 +600,7 @@ Paused（暂停）- 可从任何状态进入
 #### API 设计
 
 **Session 创建**
-- 输入：可选标题、可选 AgentId
+- 输入：可选标题、可选 OrchestratorId
 - 输出：Result<Session, Error>
 - 初始状态：Draft
 - 创建初始 Checkpoint
@@ -468,21 +609,21 @@ Paused（暂停）- 可从任何状态进入
 - 输入：SessionId
 - 输出：Result<(), Error>
 - 状态转换：Draft/Paused → Active
-- 如果有关联 Agent，通知 Agent
+- 如果有关联总控，通知总控
 
 **Session 暂停**
 - 输入：SessionId
 - 输出：Result<(), Error>
 - 状态转换：Active → Paused
 - 创建 Checkpoint
-- 如果有关联 Agent，通知 Agent
+- 如果有关联总控，通知总控
 
 **Session 恢复**
 - 输入：SessionId
 - 输出：Result<(), Error>
 - 状态转换：Paused → Active
 - 恢复到最新的 Checkpoint
-- 如果有关联 Agent，通知 Agent
+- 如果有关联总控，通知总控
 
 **Session 归档**
 - 输入：SessionId
@@ -490,7 +631,7 @@ Paused（暂停）- 可从任何状态进入
 - 状态转换：任何状态 → Archived
 - 创建最终 Checkpoint
 - 归档所有相关 Checkpoint
-- 如果有关联 Agent，通知 Agent 释放资源
+- 如果有关联总控，通知总控释放资源
 
 **Session 删除（软删除）**
 - 输入：SessionId
@@ -505,23 +646,23 @@ Paused（暂停）- 可从任何状态进入
 - 清理所有相关 Checkpoint
 - 清理 AgentFS 中的数据
 
-**Session 关联 Agent**
-- 输入：SessionId, AgentId
+**Session 关联总控**
+- 输入：SessionId, OrchestratorId
 - 输出：Result<(), Error>
 - Session 必须是 Draft 或 Active 状态
 
-**Session 解绑 Agent**
+**Session 解绑总控**
 - 输入：SessionId
 - 输出：Result<(), Error>
 - 创建 Checkpoint
-- 通知 Agent
+- 通知总控
 
 **Session 查询**
 - 输入：SessionId
 - 输出：Result<Session, Error>
 
 **Session 列表查询**
-- 输入：可选过滤条件（状态、AgentId、创建时间范围）
+- 输入：可选过滤条件（状态、OrchestratorId、创建时间范围）
 - 输出：Result<Vec<Session>, Error>
 
 **Session 历史查询**
@@ -544,7 +685,7 @@ Paused（暂停）- 可从任何状态进入
 
 #### 测试策略
 - 单元测试：Session 状态机、CRUD 操作
-- 集成测试：Session 与 Agent 的协作
+- 集成测试：Session 与总控的协作
 - 集成测试：Session 与 Checkpoint 的集成
 - 回归测试：确保现有功能不受影响
 
@@ -552,13 +693,13 @@ Paused（暂停）- 可从任何状态进入
 - [ ] 可以创建 Session，初始状态为 Draft
 - [ ] Session 状态机所有合法转换都能正常工作
 - [ ] 非法状态转换被正确拒绝
-- [ ] 可以将 Session 关联到 Agent
-- [ ] 可以解绑 Agent
+- [ ] 可以将 Session 关联到总控
+- [ ] 可以解绑总控
 - [ ] Session 创建时自动创建初始 Checkpoint
 - [ ] Session 状态变化时自动创建 Checkpoint
 - [ ] Session 归档时归档所有 Checkpoint
 - [ ] 可以查询 Session 列表
-- [ ] 可以按状态、Agent 过滤 Session
+- [ ] 可以按状态、总控过滤 Session
 - [ ] 可以查询 Session 的生命周期历史
 - [ ] 可以恢复到指定的 Checkpoint
 - [ ] 可以清理过期的 Checkpoint
@@ -743,25 +884,23 @@ Paused（暂停）- 可从任何状态进入
 
 ---
 
-### Phase 4.5: 上下文管理 Agent（基础版）
+### Phase 4.5: 上下文管理 Agent（基础版，两种触发机制）
 
 #### 任务清单
 - [ ] 定义 ContextId 类型
 - [ ] 定义 ContextChunk 结构
 - [ ] 定义 ContextMetadata 结构
 - [ ] 定义 ContextStore 结构
-- [ ] 定义裁剪触发条件
-- [ ] 实现上下文接收与存储
-- [ ] 实现上下文长度监控
-- [ ] 实现基于规则的裁剪触发判断
-- [ ] 定义转交判断规则
-- [ ] 实现转交时机识别
-- [ ] 定义上下文裁剪策略模板
-- [ ] 定义转交判断策略模板
-- [ ] 实现模板版本管理
-- [ ] 实现 ContextManagerAgent（作为特殊 Agent）
-- [ ] 编写单元测试
-- [ ] 验证验收清单
+- 实现 Agent 求助接收机制（触发点 1）
+- 实现上下文长度监控（触发点 2，唯一自动触发点）
+- 实现上下文清理（裁剪）
+- 实现持续犯错判断
+- 实现回退到指定 Checkpoint
+- 实现触发总控转交
+- 定义上下文裁剪策略模板
+- 实现 ContextManagerAgent（作为特殊 Agent）
+- 编写单元测试
+- 验证验收清单
 
 #### 数据结构设计
 
@@ -783,7 +922,7 @@ Paused（暂停）- 可从任何状态进入
 
 **ContextChunkType**
 - 枚举类型
-- 值：UserMessage, AssistantMessage, ToolCall, ToolResult, SystemPrompt, SystemNotification
+- 值：UserMessage, AssistantMessage, ToolCall, ToolResult, SystemPrompt, SystemNotification, WorkOrder, HelpRequest
 
 **ContextMetadata**
 - session_id: SessionId
@@ -802,9 +941,7 @@ Paused（暂停）- 可从任何状态进入
 
 **TrimmingTrigger**
 - 触发裁剪的条件
-- max_token_count: usize（最大 token 数）
-- max_chunk_count: usize（最大块数）
-- max_age_seconds: Option<u64>（最大存活时间）
+- max_token_count: usize（最大 token 数，默认 90%）
 
 **TrimmingStrategy**
 - 裁剪策略
@@ -818,25 +955,23 @@ Paused（暂停）- 可从任何状态进入
 - ImportanceBased: 基于重要性，删除最不重要的
 - Hybrid: 混合策略，结合时间和重要性
 
-**HandoverRule**
-- 转交规则
-- rule_type: HandoverRuleType
-- condition: String（规则条件描述）
-- target_agent_role: Option<AgentRole>（目标 Agent 角色）
-- target_agent_id: Option<AgentId>（目标 Agent ID）
-- priority: u8（规则优先级）
+**ContinuousMistakeDetector**
+- 检测持续犯错
+- session_id: SessionId
+- mistake_window_seconds: u64（时间窗口）
+- mistake_threshold: u32（错误次数阈值）
+- recent_mistakes: Vec<DateTime<Utc>>
 
-**HandoverRuleType**
-- TokenLimitReached: token 达到限制
-- TaskTypeMismatch: 任务类型不匹配
-- ComplexityExceeded: 复杂度超出
-- ExplicitRequest: 明确请求转交
-- ErrorRecovery: 错误恢复
+**WorkOrder**
+- 工单格式（作为 User Message）
+- completed_work: String（已完成部分详细标注）
+- related_files: Vec<String>（相关文件的相对路径列表）
+- next_stage_plan: String（下一阶段的详细计划）
 
 **StrategyTemplate**
 - 模板 ID
 - 模板名称
-- 模板类型（Trimming, Handover）
+- 模板类型（Trimming）
 - 模板内容（JSON 或 YAML）
 - 版本号
 - 创建时间
@@ -864,15 +999,30 @@ Paused（暂停）- 可从任何状态进入
 - 输出：Result<Vec<ContextChunk>, Error>
 - 应用裁剪策略，返回裁剪后的上下文
 
-**检查是否需要裁剪**
+**检查是否需要裁剪（触发点 2）**
 - 输入：SessionId, TrimmingTrigger
 - 输出：Result<bool, Error>
 - 返回 true 表示需要裁剪
+- 这是唯一的自动触发点
+
+**接收 Agent 求助（触发点 1）**
+- 输入：HelpRequest
+- 输出：Result<(), Error>
+- 记录求助
+- 分析情况
+- 决定回退到哪个 Checkpoint
+- 触发总控转交
 
 **执行裁剪**
 - 输入：SessionId, TrimmingStrategy
 - 输出：Result<usize, Error>（裁剪的块数）
 - 从存储中移除被裁剪的块（或标记为已裁剪）
+- 创建 Checkpoint 保存裁剪前的状态
+
+**判断是否持续犯错**
+- 输入：SessionId, ContinuousMistakeDetector
+- 输出：Result<bool, Error>
+- 返回 true 表示在持续犯错
 
 **标记上下文块为重要**
 - 输入：ContextId, is_important: bool, retention_priority: Option<u8>
@@ -882,21 +1032,10 @@ Paused（暂停）- 可从任何状态进入
 - 输入：SessionId
 - 输出：Result<ContextMetadata, Error>
 
-**添加转交规则**
-- 输入：HandoverRule
-- 输出：Result<(), Error>
-
-**移除转交规则**
-- 输入：规则 ID
-- 输出：Result<(), Error>
-
-**查询所有转交规则**
-- 输出：Result<Vec<HandoverRule>, Error>
-
-**检查是否需要转交**
-- 输入：SessionId, 当前 AgentId
-- 输出：Result<Option<HandoverRecommendation>, Error>
-- HandoverRecommendation 包含目标 Agent 和原因
+**创建工单**
+- 输入：WorkOrder
+- 输出：Result<String, Error>
+- 序列化为 JSON 字符串，作为 User Message
 
 **保存策略模板**
 - 输入：StrategyTemplate
@@ -915,32 +1054,38 @@ Paused（暂停）- 可从任何状态进入
 - 输出：Result<(), Error>
 
 **ContextManagerAgent 特殊功能**
-- 监控 Session 上下文大小
-- 自动触发裁剪
-- 评估转交条件
-- 生成转交建议
-- 执行上下文裁剪（根据配置）
+- 监听 Agent 求助（触发点 1）
+- 监控 Session 上下文大小（触发点 2，唯一自动触发）
+- 收到求助时：分析、决定回退 Checkpoint、通知总控
+- 上下文满载时：清理、判断持续犯错、决定是否回退+转交
+- 其他情况不自动触发
 
 #### 测试策略
 - 单元测试：上下文存储和检索
 - 单元测试：裁剪策略
-- 单元测试：转交规则
-- 集成测试：ContextManagerAgent 端到端流程
+- 单元测试：持续犯错检测
+- 单元测试：求助接收和处理
+- 单元测试：工单生成
+- 集成测试：ContextManagerAgent 端到端流程（两种触发机制）
 
 #### 验收标准
 - [ ] 可以存储上下文块
 - [ ] 可以获取完整上下文
 - [ ] 可以正确计算 token 数
-- [ ] 可以检查是否需要裁剪
+- [ ] 可以检查是否需要裁剪（唯一自动触发点）
+- [ ] 可以接收 Agent 求助
 - [ ] FIFO 裁剪策略正常工作
 - [ ] 基于重要性的裁剪策略正常工作
 - [ ] 混合裁剪策略正常工作
 - [ ] 重要块被优先保留
 - [ ] 可以标记块为重要
-- [ ] 转交规则可以正确评估
-- [ ] 可以检查是否需要转交
+- [ ] 持续犯错检测正常工作
+- [ ] 可以决定回退到哪个 Checkpoint
+- [ ] 可以通知总控进行转交
+- 可以创建工单（JSON 格式）
 - [ ] 策略模板可以保存和读取
 - [ ] 可以设置默认模板
+- [ ] ContextManagerAgent 只在两种情况下触发
 - [ ] ContextManagerAgent 可以监控上下文
 - [ ] ContextManagerAgent 可以自动触发裁剪
 - [ ] 所有单元测试通过
@@ -951,12 +1096,22 @@ Paused（暂停）- 可从任何状态进入
 ### Phase 4.6: 基础 API 扩展
 
 #### 任务清单
+- [ ] 设计总控管理 REST API
+- [ ] 实现总控创建 API（支持嵌套深度）
+- [ ] 实现总控查询 API（列表和详情）
+- [ ] 实现总控更新 API
+- [ ] 实现总控删除 API
 - [ ] 设计 Agent 管理 REST API
-- [ ] 实现 Agent 创建 API
+- [ ] 实现 Agent 创建 API（通过总控）
 - [ ] 实现 Agent 查询 API（列表和详情）
-- [ ] 实现 Agent 更新 API
 - [ ] 实现 Agent 删除 API
 - [ ] 实现 Agent 状态查询 API
+- [ ] 设计任务管理 REST API
+- [ ] 实现任务提交 API（串行）
+- [ ] 实现任务提交 API（并行）
+- [ ] 实现任务状态查询 API
+- [ ] 实现任务等待 API
+- [ ] 实现任务取消 API
 - [ ] 设计 Session 管理 REST API
 - [ ] 实现 Session 创建 API
 - [ ] 实现 Session 激活 API
@@ -965,10 +1120,9 @@ Paused（暂停）- 可从任何状态进入
 - [ ] 实现 Session 删除 API
 - [ ] 实现 Session 查询 API（列表和详情）
 - [ ] 实现 Session 历史查询 API
-- [ ] 设计单 Agent 任务执行 API
-- [ ] 实现任务提交 API
-- [ ] 实现任务状态查询 API
-- [ ] 实现任务取消 API
+- [ ] 设计 CMA 相关 API
+- [ ] 实现求助提交 API
+- [ ] 实现 CMA 通知查询 API
 - [ ] 添加 API 请求/响应日志
 - [ ] 添加 API 文档注释（OpenAPI/Swagger）
 - [ ] 编写 API 集成测试
@@ -976,56 +1130,108 @@ Paused（暂停）- 可从任何状态进入
 
 #### API 设计
 
-**Agent 管理 API**
+**总控管理 API**
 
-`POST /api/agents`
-- 创建新 Agent
-- 请求体：AgentConfig
-- 响应：Agent（包含生成的 ID）
+`POST /api/orchestrators`
+- 创建新总控
+- 请求体：OrchestratorConfig（包含 nested_depth）
+- 响应：Orchestrator（包含生成的 ID）
 - 状态码：201 Created
 
-`GET /api/agents`
-- 列出所有 Agent
-- 查询参数：role, capability, state, page, page_size
-- 响应：{ agents: Vec<Agent>, total: usize, page: usize, page_size: usize }
+`GET /api/orchestrators`
+- 列出所有总控
+- 查询参数：role, nested_depth, page, page_size
+- 响应：{ orchestrators: Vec<Orchestrator>, total: usize, page: usize, page_size: usize }
 - 状态码：200 OK
 
-`GET /api/agents/:id`
+`GET /api/orchestrators/:id`
+- 获取总控详情
+- 响应：Orchestrator
+- 状态码：200 OK, 404 Not Found
+
+`PUT /api/orchestrators/:id`
+- 更新总控配置
+- 请求体：部分 OrchestratorConfig 字段
+- 响应：Orchestrator
+- 状态码：200 OK, 404 Not Found
+
+`DELETE /api/orchestrators/:id`
+- 删除总控
+- 响应：204 No Content, 404 Not Found, 409 Conflict（如果有活跃任务）
+
+**Agent 管理 API**
+
+`POST /api/orchestrators/:orchestrator_id/agents`
+- 通过总控创建新 Agent
+- 请求体：AgentConfig
+- 响应：Agent（包含生成的 ID）
+- 状态码：201 Created, 404 Not Found
+
+`GET /api/orchestrators/:orchestrator_id/agents`
+- 列出总控管理的所有 Agent
+- 查询参数：role, capability, state, page, page_size
+- 响应：{ agents: Vec<Agent>, total: usize, page: usize, page_size: usize }
+- 状态码：200 OK, 404 Not Found
+
+`GET /api/orchestrators/:orchestrator_id/agents/:id`
 - 获取 Agent 详情
 - 响应：Agent
 - 状态码：200 OK, 404 Not Found
 
-`PUT /api/agents/:id`
-- 更新 Agent 配置
-- 请求体：部分 AgentConfig 字段
-- 响应：Agent
-- 状态码：200 OK, 404 Not Found
-
-`DELETE /api/agents/:id`
+`DELETE /api/orchestrators/:orchestrator_id/agents/:id`
 - 删除 Agent
 - 响应：204 No Content, 404 Not Found, 409 Conflict（如果 Agent 忙碌）
 
-`GET /api/agents/:id/state`
+`GET /api/orchestrators/:orchestrator_id/agents/:id/state`
 - 获取 Agent 状态
 - 响应：{ state: AgentState, updated_at: DateTime }
 - 状态码：200 OK, 404 Not Found
 
-`GET /api/agents/:id/health`
-- 健康检查
-- 响应：{ status: HealthStatus, details: Option<String> }
+**任务管理 API**
+
+`POST /api/orchestrators/:orchestrator_id/tasks/serial`
+- 提交串行任务
+- 请求体：{ agent_id: string, task: AgentTask }
+- 响应：{ task_id: string, result: AgentTaskResult }
 - 状态码：200 OK, 404 Not Found
+
+`POST /api/orchestrators/:orchestrator_id/tasks/parallel`
+- 提交并行任务
+- 请求体：ParallelTasks
+- 响应：{ task_id: string, status: TaskStatus }
+- 状态码：202 Accepted, 404 Not Found
+
+`GET /api/orchestrators/:orchestrator_id/tasks/:id`
+- 获取任务状态
+- 响应：{ task_id: string, status: TaskStatus, results?: Vec<AgentTaskResult>, error?: string }
+- 状态码：200 OK, 404 Not Found
+
+`POST /api/orchestrators/:orchestrator_id/tasks/:id/wait`
+- 等待任务完成
+- 响应：{ task_id: string, status: TaskStatus, results: Vec<AgentTaskResult> }
+- 状态码：200 OK, 404 Not Found
+
+`DELETE /api/orchestrators/:orchestrator_id/tasks/:id`
+- 取消任务
+- 响应：204 No Content, 404 Not Found, 409 Conflict（如果任务已完成）
+
+`GET /api/orchestrators/:orchestrator_id/tasks`
+- 列出任务
+- 查询参数：agent_id, session_id, status, page, page_size
+- 响应：{ tasks: Vec<TaskInfo>, total: usize, page: usize, page_size: usize }
+- 状态码：200 OK
 
 **Session 管理 API**
 
 `POST /api/sessions`
 - 创建新 Session
-- 请求体：{ title?: string, agent_id?: string }
+- 请求体：{ title?: string, orchestrator_id?: string }
 - 响应：Session
 - 状态码：201 Created
 
 `GET /api/sessions`
 - 列出所有 Session
-- 查询参数：state, agent_id, created_before, created_after, page, page_size
+- 查询参数：state, orchestrator_id, created_before, created_after, page, page_size
 - 响应：{ sessions: Vec<Session>, total: usize, page: usize, page_size: usize }
 - 状态码：200 OK
 
@@ -1072,38 +1278,35 @@ Paused（暂停）- 可从任何状态进入
 - 响应：Session
 - 状态码：200 OK, 404 Not Found
 
-`POST /api/sessions/:id/assign-agent`
-- 为 Session 分配 Agent
-- 请求体：{ agent_id: string }
+`POST /api/sessions/:id/assign-orchestrator`
+- 为 Session 分配总控
+- 请求体：{ orchestrator_id: string }
 - 响应：Session
 - 状态码：200 OK, 404 Not Found, 409 Conflict
 
-`POST /api/sessions/:id/unassign-agent`
-- 解绑 Agent
+`POST /api/sessions/:id/unassign-orchestrator`
+- 解绑总控
 - 响应：Session
 - 状态码：200 OK, 404 Not Found
 
-**单 Agent 任务执行 API**
+**CMA 相关 API**
 
-`POST /api/tasks`
-- 提交任务
-- 请求体：{ session_id?: string, agent_id: string, task_description: string, context?: any }
-- 响应：{ task_id: string, status: TaskStatus }
+`POST /api/cma/help-requests`
+- Agent 提交求助
+- 请求体：HelpRequest
+- 响应：{ received: bool, message: string }
 - 状态码：202 Accepted
 
-`GET /api/tasks/:id`
-- 获取任务状态
-- 响应：{ task_id: string, status: TaskStatus, result?: any, error?: string, created_at: DateTime, updated_at: DateTime }
-- 状态码：200 OK, 404 Not Found
+`GET /api/cma/help-requests`
+- 列出求助请求
+- 查询参数：session_id, agent_id, status, page, page_size
+- 响应：{ requests: Vec<HelpRequest>, total: usize, page: usize, page_size: usize }
+- 状态码：200 OK
 
-`DELETE /api/tasks/:id`
-- 取消任务
-- 响应：204 No Content, 404 Not Found, 409 Conflict（如果任务已完成）
-
-`GET /api/tasks`
-- 列出任务
-- 查询参数：agent_id, session_id, status, page, page_size
-- 响应：{ tasks: Vec<TaskInfo>, total: usize, page: usize, page_size: usize }
+`GET /api/cma/notifications`
+- 列出 CMA 通知
+- 查询参数：session_id, orchestrator_id, type, page, page_size
+- 响应：{ notifications: Vec<CmaNotification>, total: usize, page: usize, page_size: usize }
 - 状态码：200 OK
 
 **TaskStatus 枚举**
@@ -1120,23 +1323,29 @@ Paused（暂停）- 可从任何状态进入
 - 性能测试：基本的负载测试
 
 #### 验收标准
+- [ ] 可以通过 API 创建总控（支持嵌套深度）
+- [ ] 可以通过 API 查询总控列表和详情
+- [ ] 可以通过 API 更新总控
+- [ ] 可以通过 API 删除总控
 - [ ] 可以通过 API 创建 Agent
 - [ ] 可以通过 API 查询 Agent 列表和详情
-- [ ] 可以通过 API 更新 Agent
 - [ ] 可以通过 API 删除空闲 Agent
 - [ ] 不能通过 API 删除忙碌 Agent
-- [ ] 可以查询 Agent 状态和健康
+- [ ] 可以查询 Agent 状态
+- [ ] 可以通过 API 提交串行任务
+- [ ] 可以通过 API 提交并行任务
+- [ ] 可以查询任务状态
+- [ ] 可以等待任务完成
+- [ ] 可以取消待执行的任务
 - [ ] 可以通过 API 创建 Session
 - [ ] 可以通过 API 查询 Session 列表和详情
 - [ ] 可以通过 API 激活、暂停、归档 Session
 - [ ] 可以通过 API 删除 Session
 - [ ] 可以查询 Session 历史和 Checkpoint
 - [ ] 可以恢复到指定 Checkpoint
-- [ ] 可以为 Session 分配和解绑 Agent
-- [ ] 可以通过 API 提交任务
-- [ ] 可以查询任务状态
-- [ ] 可以取消待执行的任务
-- [ ] 单 Agent 任务执行流程完整工作
+- [ ] 可以为 Session 分配和解绑总控
+- [ ] 可以通过 API 提交求助
+- [ ] 可以查询求助和 CMA 通知
 - [ ] 所有 API 端点都有适当的日志
 - [ ] 错误响应格式一致
 - [ ] 所有 API 集成测试通过
@@ -1198,13 +1407,14 @@ Paused（暂停）- 可从任何状态进入
 
 **ACP Server**
 - 独立的服务器，与 REST API 并行运行
-- 共享应用状态（AgentRepository, SessionRepository 等）
+- 共享应用状态（总控、Session 等）
 - 使用 ACP 协议与客户端通信
 
 **ACP Agent 实现**
 - 包装 MineClaw 的核心逻辑
 - 将 ACP 请求转换为内部调用
 - 将内部响应转换为 ACP 格式
+- 内部使用总控来管理任务
 
 **工具桥接层**
 - 将 ACP 工具调用转换为 ToolCoordinator 调用
@@ -1226,7 +1436,7 @@ Paused（暂停）- 可从任何状态进入
 
 **AcpSessionState**
 - session_id: SessionId（内部 Session ID）
-- agent_id: Option<AgentId>（关联的 Agent）
+- orchestrator_id: Option<OrchestratorId>（关联的总控）
 - created_at: DateTime<Utc>
 - last_activity_at: DateTime<Utc>
 
@@ -1249,11 +1459,12 @@ Paused（暂停）- 可从任何状态进入
 **Prompt Turn 处理流程**
 1. 接收 ACP prompt 请求
 2. 创建或获取内部 Session
-3. 如果需要，分配 Agent
+3. 如果需要，创建或获取总控
 4. 将用户输入转换为内部消息
-5. 调用 Agent 处理
-6. 将 Agent 响应转换为 ACP 格式
-7. 返回响应
+5. 通过总控分配任务给 Agent
+6. 等待 Agent 响应
+7. 将 Agent 响应转换为 ACP 格式
+8. 返回响应
 
 **工具调用流程**
 1. 接收 ACP 工具调用请求
@@ -1309,22 +1520,21 @@ Paused（暂停）- 可从任何状态进入
 
 ### 技术风险
 
-**风险 1：Agent 并发控制复杂**
+**风险 1：嵌套子总控逻辑复杂**
 - 概率：中等
 - 影响：高
 - 缓解措施：
-  - 从简单的进程内模型开始
-  - 使用成熟的 tokio 同步原语
-  - 充分的并发测试
+  - 从简单的嵌套开始（Level 1）
+  - 充分的单元测试
   - 详细的日志记录
 
-**风险 2：消息总线性能瓶颈**
-- 概率：低（Phase 4 规模小）
+**风险 2：上下文管理逻辑复杂**
+- 概率：中等
 - 影响：中等
 - 缓解措施：
-  - 使用高性能的 mpsc channel
-  - 设计时预留扩展空间
-  - 性能监控和基准测试
+  - 从简单的规则开始
+  - 明确只有两个触发点
+  - 充分的测试
 
 **风险 3：ACP 协议集成复杂**
 - 概率：中等
@@ -1383,6 +1593,7 @@ Paused（暂停）- 可从任何状态进入
 - Rust Async Book
 
 ### 多 Agent 系统
+- PLAN.md: 整体项目计划
 - 相关学术论文
 - 开源项目参考
 
@@ -1391,13 +1602,29 @@ Paused（暂停）- 可从任何状态进入
 ## 附录
 
 ### 术语表
-- **Agent**：独立的 AI 实体，可以执行任务
+- **Agent**：独立的 AI 实体，执行具体任务
+- **Master Orchestrator（主总控）**：最顶层的唯一总控
+- **Sub-Orchestrator（子总控）**：中层管理者，可以嵌套，知道自己的深度
+- **Nested Depth（嵌套深度）**：子总控在层级中的位置（Master 为 0）
 - **Session**：用户与系统的一次交互会话
 - **Checkpoint**：Session 状态的快照
-- **Message Bus**：Agent 间通信的基础设施
 - **Tool Mask**：控制 Agent 工具使用权限的机制
-- **Context Manager**：管理会话上下文的特殊 Agent
+- **Context Manager Agent (CMA)**：管理会话上下文的特殊 Agent（监军）
+- **Help Request（求助工单）**：Agent 向 CMA 发送的求助请求
+- **Work Order（工单）**：接力转交时的任务描述（作为 User Message）
+- **嵌套子总控接力模式**：强依赖顺序场景的执行模式
+- **平行子总控集群模式**：可并行分解场景的执行模式
 - **ACP**：Agent Client Protocol，用于与编辑器集成的协议
+
+### 关键设计决策回顾（PHASE4 特定）
+1. **架构模型**：层级化总控 + 可嵌套子总控 + 单向流水线
+2. **Agent 模型**：无状态的执行者 + 可嵌套总控（知道嵌套深度）
+3. **通信方式**：直接函数调用
+4. **工单机制**：作为 User Message
+5. **复杂任务**：两种执行模式（嵌套子总控接力、平行子总控集群）
+6. **CMA 触发**：只有两种情况（Agent 求助、上下文满载）
+7. **文件并发**：避免冲突
+8. **嵌套限制**：软性劝阻，不硬性限制（保持灵活性）
 
 ### 检查清单模板
 每个子阶段完成后，使用以下清单验证：
@@ -1414,6 +1641,6 @@ Paused（暂停）- 可从任何状态进入
 
 ---
 
-**文档版本**：1.0
+**文档版本**：3.0（更新以契合新 PLAN.md 架构）
 **最后更新**：2024
 **维护者**：MineClaw 团队
