@@ -319,16 +319,10 @@ impl Session {
         let mut checkpoint = None;
 
         // 如果需要，先创建 Checkpoint
-        if should_create_checkpoint
-            && let Some(cm) = checkpoint_manager
-        {
+        if should_create_checkpoint && let Some(cm) = checkpoint_manager {
             let description = match (&self.state, &target_state) {
-                (SessionState::Active, SessionState::Paused) => {
-                    Some("Session paused".to_string())
-                }
-                (SessionState::Paused, SessionState::Active) => {
-                    Some("Session resumed".to_string())
-                }
+                (SessionState::Active, SessionState::Paused) => Some("Session paused".to_string()),
+                (SessionState::Paused, SessionState::Active) => Some("Session resumed".to_string()),
                 (_, SessionState::Archived) => Some("Session archived".to_string()),
                 _ => None,
             };

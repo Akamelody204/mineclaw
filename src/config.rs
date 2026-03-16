@@ -387,7 +387,10 @@ impl Config {
             match Regex::new(regex_str) {
                 Ok(re) => compiled_always_allow.push(re),
                 Err(e) => {
-                    warn!("Failed to compile always_allow regex '{}': {}", regex_str, e);
+                    warn!(
+                        "Failed to compile always_allow regex '{}': {}",
+                        regex_str, e
+                    );
                 }
             }
         }
@@ -398,7 +401,10 @@ impl Config {
             match Regex::new(regex_str) {
                 Ok(re) => compiled_always_confirm.push(re),
                 Err(e) => {
-                    warn!("Failed to compile always_confirm regex '{}': {}", regex_str, e);
+                    warn!(
+                        "Failed to compile always_confirm regex '{}': {}",
+                        regex_str, e
+                    );
                 }
             }
         }

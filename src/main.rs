@@ -7,7 +7,10 @@ use agentsql::SqlBackend;
 use axum::serve;
 use mineclaw::checkpoint::CheckpointManager;
 use mineclaw::mcp::{McpServerManager, ToolExecutor};
-use mineclaw::tools::{LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool, terminal::TerminalTool};
+use mineclaw::tools::{
+    LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool,
+    terminal::TerminalTool,
+};
 use mineclaw::{
     AppState, Config, SessionRepository, ToolCoordinator, create_provider, create_router,
 };
