@@ -7,7 +7,7 @@ use agentsql::SqlBackend;
 use axum::serve;
 use mineclaw::checkpoint::CheckpointManager;
 use mineclaw::mcp::{McpServerManager, ToolExecutor};
-use mineclaw::tools::{LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool};
+use mineclaw::tools::{LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool, terminal::TerminalTool};
 use mineclaw::{
     AppState, Config, SessionRepository, ToolCoordinator, create_provider, create_router,
 };
@@ -89,6 +89,7 @@ async fn main() -> mineclaw::Result<()> {
     let mut local_tool_registry = LocalToolRegistry::new();
     FilesystemTool::register_all(&mut local_tool_registry);
     CheckpointTools::register_all(&mut local_tool_registry);
+    TerminalTool::register_all(&mut local_tool_registry);
     info!(
         "Local tools registered: {:?}",
         local_tool_registry

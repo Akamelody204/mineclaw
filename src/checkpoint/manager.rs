@@ -651,7 +651,10 @@ mod tests {
     }
 
     fn create_test_config(enabled: bool) -> CheckpointConfig {
-        CheckpointConfig { enabled }
+        CheckpointConfig {
+            enabled,
+            checkpoint_directory: ".checkpoints".to_string(),
+        }
     }
 
     async fn create_test_file(

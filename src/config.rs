@@ -1,4 +1,5 @@
 use crate::encryption::EncryptionManager;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -11,38 +12,122 @@ pub struct CheckpointConfig {
     /// 是否启用 checkpoint
     #[serde(default = "default_checkpoint_enabled")]
     pub enabled: bool,
+    /// Checkpoint 存储目录（agentfs 路径）
+    #[serde(default = "default_checkpoint_directory")]
+    pub checkpoint_directory: String,
 }
 
 fn default_checkpoint_enabled() -> bool {
     true
 }
 
+fn default_checkpoint_directory() -> String {
+    ".checkpoints".to_string()
+}
+
 impl Default for CheckpointConfig {
     fn default() -> Self {
         Self {
             enabled: default_checkpoint_enabled(),
+            checkpoint_directory: default_checkpoint_directory(),
         }
     }
 }
 
-/// 数据存储配置
+/// 终端工具配置
 #[derive(Debug, Deserialize, Clone)]
-pub struct DataConfig {
-    /// 数据存储根目录
-    #[serde(default = "default_data_path")]
-    pub path: String,
+pub struct TerminalConfig {
+    /// 是否启用终端工具
+    #[serde(default = "default_terminal_enabled")]
+    pub enabled: bool,
+    /// 最大输出字节数
+    #[serde(default = "default_terminal_max_output_bytes")]
+    pub max_output_bytes: usize,
+    /// 超时秒数
+    #[serde(default = "default_terminal_timeout_seconds")]
+    pub timeout_seconds: u64,
+    /// 最大并发进程数
+    #[serde(default = "default_terminal_max_concurrent_processes")]
+    pub max_concurrent_processes: usize,
+    /// 允许的工作目录
+    #[serde(default)]
+    pub allowed_workspaces: Vec<String>,
+    /// 命令黑名单
+    #[serde(default)]
+    pub command_blacklist: Vec<String>,
+    /// 命令正则表达式黑名单
+    #[serde(default)]
+    pub command_blacklist_regex: Vec<String>,
+    /// 始终允许的命令正则表达式
+    #[serde(default)]
+    pub always_allow_regex: Vec<String>,
+    /// 需要确认的命令正则表达式
+    #[serde(default)]
+    pub always_confirm_regex: Vec<String>,
+    /// 后台任务存活时间 (分钟) (Phase EX3)
+    #[serde(default = "default_background_task_ttl_minutes")]
+    pub background_task_ttl_minutes: u64,
+
+    /// 编译后的黑名单正则
+    #[serde(skip)]
+    pub compiled_blacklist: Vec<Regex>,
+    /// 编译后的始终允许正则
+    #[serde(skip)]
+    pub compiled_always_allow: Vec<Regex>,
+    /// 编译后的始终确认正则
+    #[serde(skip)]
+    pub compiled_always_confirm: Vec<Regex>,
+    /// 过滤规则
+    #[serde(default)]
+    pub filters: HashMap<String, Vec<String>>,
 }
 
-fn default_data_path() -> String {
-    "data".to_string()
+fn default_terminal_enabled() -> bool {
+    true
 }
 
-impl Default for DataConfig {
+fn default_terminal_max_output_bytes() -> usize {
+    1048576 // 1MB
+}
+
+fn default_terminal_timeout_seconds() -> u64 {
+    300
+}
+
+fn default_background_task_ttl_minutes() -> u64 {
+    30
+}
+
+fn default_terminal_max_concurrent_processes() -> usize {
+    4
+}
+
+impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            path: default_data_path(),
+            enabled: default_terminal_enabled(),
+            max_output_bytes: default_terminal_max_output_bytes(),
+            timeout_seconds: default_terminal_timeout_seconds(),
+            max_concurrent_processes: default_terminal_max_concurrent_processes(),
+            allowed_workspaces: Vec::new(),
+            command_blacklist: Vec::new(),
+            command_blacklist_regex: Vec::new(),
+            always_allow_regex: Vec::new(),
+            always_confirm_regex: Vec::new(),
+            background_task_ttl_minutes: default_background_task_ttl_minutes(),
+            compiled_blacklist: Vec::new(),
+            compiled_always_allow: Vec::new(),
+            compiled_always_confirm: Vec::new(),
+            filters: HashMap::new(),
         }
     }
+}
+
+/// 本地工具配置
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LocalToolsConfig {
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -54,16 +139,16 @@ pub struct Config {
     #[serde(default)]
     pub filesystem: FilesystemConfig,
     #[serde(default)]
-    pub checkpoint: CheckpointConfig,
+    pub local_tools: LocalToolsConfig,
     #[serde(default)]
-    pub data: DataConfig,
+    pub checkpoint: CheckpointConfig,
     #[serde(default = "default_agentfs_db_path")]
     pub agentfs_db_path: String,
     pub encryption: Option<EncryptionConfig>,
 }
 
 fn default_agentfs_db_path() -> String {
-    "data/checkpoint/agentfs.db".to_string()
+    "data/mineclaw.db".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -142,8 +227,8 @@ impl Default for Config {
             },
             mcp: None,
             filesystem: FilesystemConfig::default(),
+            local_tools: LocalToolsConfig::default(),
             checkpoint: CheckpointConfig::default(),
-            data: DataConfig::default(),
             agentfs_db_path: default_agentfs_db_path(),
             encryption: None,
         }
@@ -174,9 +259,27 @@ impl Config {
             .map_err(crate::error::Error::Config)?
             .set_default("llm.temperature", default_config.llm.temperature)
             .map_err(crate::error::Error::Config)?
-            .set_default("data.path", default_config.data.path)
-            .map_err(crate::error::Error::Config)?
             .set_default("agentfs_db_path", default_config.agentfs_db_path)
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.enabled",
+                default_config.local_tools.terminal.enabled,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.max_output_bytes",
+                default_config.local_tools.terminal.max_output_bytes as i64,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.timeout_seconds",
+                default_config.local_tools.terminal.timeout_seconds,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.max_concurrent_processes",
+                default_config.local_tools.terminal.max_concurrent_processes as i64,
+            )
             .map_err(crate::error::Error::Config)?;
 
         if config_path.exists() {
@@ -266,6 +369,40 @@ impl Config {
                 );
             }
         }
+
+        // 编译正则表达式（用于终端工具）
+        let mut compiled_blacklist = Vec::new();
+        for regex_str in &config.local_tools.terminal.command_blacklist_regex {
+            match Regex::new(regex_str) {
+                Ok(re) => compiled_blacklist.push(re),
+                Err(e) => {
+                    warn!("Failed to compile blacklist regex '{}': {}", regex_str, e);
+                }
+            }
+        }
+        config.local_tools.terminal.compiled_blacklist = compiled_blacklist;
+
+        let mut compiled_always_allow = Vec::new();
+        for regex_str in &config.local_tools.terminal.always_allow_regex {
+            match Regex::new(regex_str) {
+                Ok(re) => compiled_always_allow.push(re),
+                Err(e) => {
+                    warn!("Failed to compile always_allow regex '{}': {}", regex_str, e);
+                }
+            }
+        }
+        config.local_tools.terminal.compiled_always_allow = compiled_always_allow;
+
+        let mut compiled_always_confirm = Vec::new();
+        for regex_str in &config.local_tools.terminal.always_confirm_regex {
+            match Regex::new(regex_str) {
+                Ok(re) => compiled_always_confirm.push(re),
+                Err(e) => {
+                    warn!("Failed to compile always_confirm regex '{}': {}", regex_str, e);
+                }
+            }
+        }
+        config.local_tools.terminal.compiled_always_confirm = compiled_always_confirm;
 
         Ok(config)
     }
