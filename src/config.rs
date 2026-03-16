@@ -1,4 +1,5 @@
 use crate::encryption::EncryptionManager;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -125,12 +126,37 @@ pub struct TerminalConfig {
     /// 超时秒数
     #[serde(default = "default_terminal_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// 最大并发进程数
+    #[serde(default = "default_terminal_max_concurrent_processes")]
+    pub max_concurrent_processes: usize,
     /// 允许的工作目录
     #[serde(default)]
     pub allowed_workspaces: Vec<String>,
     /// 命令黑名单
     #[serde(default)]
     pub command_blacklist: Vec<String>,
+    /// 命令正则表达式黑名单
+    #[serde(default)]
+    pub command_blacklist_regex: Vec<String>,
+    /// 始终允许的命令正则表达式
+    #[serde(default)]
+    pub always_allow_regex: Vec<String>,
+    /// 需要确认的命令正则表达式
+    #[serde(default)]
+    pub always_confirm_regex: Vec<String>,
+    /// 后台任务存活时间 (分钟) (Phase EX3)
+    #[serde(default = "default_background_task_ttl_minutes")]
+    pub background_task_ttl_minutes: u64,
+
+    /// 编译后的黑名单正则
+    #[serde(skip)]
+    pub compiled_blacklist: Vec<Regex>,
+    /// 编译后的始终允许正则
+    #[serde(skip)]
+    pub compiled_always_allow: Vec<Regex>,
+    /// 编译后的始终确认正则
+    #[serde(skip)]
+    pub compiled_always_confirm: Vec<Regex>,
     /// 过滤规则
     #[serde(default)]
     pub filters: HashMap<String, Vec<String>>,
@@ -141,11 +167,19 @@ fn default_terminal_enabled() -> bool {
 }
 
 fn default_terminal_max_output_bytes() -> usize {
-    65536 // 64KB
+    1048576 // 1MB
 }
 
 fn default_terminal_timeout_seconds() -> u64 {
-    300 // 5分钟
+    300
+}
+
+fn default_background_task_ttl_minutes() -> u64 {
+    30
+}
+
+fn default_terminal_max_concurrent_processes() -> usize {
+    4
 }
 
 impl Default for TerminalConfig {
@@ -154,21 +188,27 @@ impl Default for TerminalConfig {
             enabled: default_terminal_enabled(),
             max_output_bytes: default_terminal_max_output_bytes(),
             timeout_seconds: default_terminal_timeout_seconds(),
+            max_concurrent_processes: default_terminal_max_concurrent_processes(),
             allowed_workspaces: Vec::new(),
             command_blacklist: Vec::new(),
+            command_blacklist_regex: Vec::new(),
+            always_allow_regex: Vec::new(),
+            always_confirm_regex: Vec::new(),
+            background_task_ttl_minutes: default_background_task_ttl_minutes(),
+            compiled_blacklist: Vec::new(),
+            compiled_always_allow: Vec::new(),
+            compiled_always_confirm: Vec::new(),
             filters: HashMap::new(),
         }
     }
 }
 
 /// 本地工具配置
-#[derive(Debug, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct LocalToolsConfig {
     #[serde(default)]
     pub terminal: TerminalConfig,
 }
-
 
 impl Default for Config {
     fn default() -> Self {
@@ -247,6 +287,21 @@ impl Config {
             )
             .map_err(crate::error::Error::Config)?
             .set_default(
+                "local_tools.terminal.command_blacklist_regex",
+                default_config.local_tools.terminal.command_blacklist_regex,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.always_allow_regex",
+                default_config.local_tools.terminal.always_allow_regex,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
+                "local_tools.terminal.always_confirm_regex",
+                default_config.local_tools.terminal.always_confirm_regex,
+            )
+            .map_err(crate::error::Error::Config)?
+            .set_default(
                 "local_tools.terminal.filters",
                 default_config.local_tools.terminal.filters,
             )
@@ -261,6 +316,9 @@ impl Config {
             .build()?;
 
         let mut config = settings.try_deserialize::<Config>()?;
+
+        // 预编译终端工具正则表达式以提升执行性能
+        config.compile_terminal_regexes();
 
         // 检查环境变量中是否有加密密钥
         let encryption_key_env = std::env::var("MINECLAW_ENCRYPTION_KEY").ok();
@@ -382,6 +440,29 @@ impl Config {
         })?;
 
         Ok(())
+    }
+
+    /// 预编译终端工具的正则表达式
+    pub fn compile_terminal_regexes(&mut self) {
+        let terminal = &mut self.local_tools.terminal;
+
+        terminal.compiled_blacklist = terminal
+            .command_blacklist_regex
+            .iter()
+            .filter_map(|s| Regex::new(s).ok())
+            .collect();
+
+        terminal.compiled_always_allow = terminal
+            .always_allow_regex
+            .iter()
+            .filter_map(|s| Regex::new(s).ok())
+            .collect();
+
+        terminal.compiled_always_confirm = terminal
+            .always_confirm_regex
+            .iter()
+            .filter_map(|s| Regex::new(s).ok())
+            .collect();
     }
 
     fn get_config_path() -> crate::error::Result<PathBuf> {

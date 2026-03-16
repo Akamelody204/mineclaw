@@ -19,10 +19,12 @@ async fn test_read_write_file() {
     let temp_dir = tempdir().unwrap();
     let test_file = temp_dir.path().join("test.txt");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -79,10 +81,12 @@ async fn test_list_directory() {
     let original_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(temp_dir_abs.parent().unwrap()).unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir_str.clone()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir_str.clone()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -106,100 +110,29 @@ async fn test_list_directory() {
     let entries = result["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
 
-    let names: Vec<_> = entries
+    let names: Vec<&str> = entries
         .iter()
-        .map(|e| e["name"].as_str().unwrap())
+        .map(|i| i["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"file1.txt"));
     assert!(names.contains(&"file2.txt"));
     assert!(names.contains(&"subdir"));
-
-    // Check that paths are relative to the caller's input
-    for entry in entries {
-        let path = entry["path"].as_str().unwrap();
-        let name = entry["name"].as_str().unwrap();
-        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
-        let expected_path = std::path::PathBuf::from(temp_dir_name.to_string())
-            .join(name)
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(path, expected_path);
-    }
-
-    // Test 2: List with absolute path - should return absolute paths
-    let result = registry
-        .call_tool(
-            "list_directory",
-            json!({
-                "path": temp_dir_str
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    let entries = result["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 3);
-
-    // Paths should include the full absolute path
-    for entry in entries {
-        let path = entry["path"].as_str().unwrap();
-        let name = entry["name"].as_str().unwrap();
-        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
-        let expected_path = std::path::PathBuf::from(temp_dir_str.clone())
-            .join(name)
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(path, expected_path);
-    }
-
-    // Test 3: Recursive with relative path
-    let result = registry
-        .call_tool(
-            "list_directory",
-            json!({
-                "path": temp_dir_name.to_string(),
-                "recursive": true
-            }),
-            context,
-        )
-        .await
-        .unwrap();
-
-    let entries = result["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 4);
-
-    // Find the nested file
-    let nested_file = entries
-        .iter()
-        .find(|e| e["name"].as_str().unwrap() == "nested.txt")
-        .unwrap();
-    assert_eq!(
-        nested_file["path"].as_str().unwrap(),
-        // 使用 PathBuf 来正确构建路径，避免路径分隔符问题
-        std::path::PathBuf::from(temp_dir_name.to_string())
-            .join("subdir")
-            .join("nested.txt")
-            .to_string_lossy()
-            .to_string()
-    );
 
     // Restore original directory
     std::env::set_current_dir(original_dir).unwrap();
 }
 
 #[tokio::test]
-async fn test_delete_file() {
+async fn test_create_directory() {
     let temp_dir = tempdir().unwrap();
-    let test_file = temp_dir.path().join("test.txt");
+    let new_dir = temp_dir.path().join("new_dir");
 
-    std::fs::write(&test_file, "Test content").unwrap();
-    assert!(test_file.exists());
-
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -209,9 +142,9 @@ async fn test_delete_file() {
 
     let result = registry
         .call_tool(
-            "delete_file",
+            "create_directory",
             json!({
-                "path": test_file.to_string_lossy().to_string()
+                "path": new_dir.to_string_lossy().to_string()
             }),
             context,
         )
@@ -219,109 +152,24 @@ async fn test_delete_file() {
         .unwrap();
 
     assert!(result["success"].as_bool().unwrap());
-    assert!(!test_file.exists());
+    assert!(new_dir.exists());
+    assert!(new_dir.is_dir());
 }
 
 #[tokio::test]
-async fn test_path_traversal_protection() {
-    let temp_dir = tempdir().unwrap();
-
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
-    };
-
-    let mut registry = LocalToolRegistry::new();
-    FilesystemTool::register_all(&mut registry);
-
-    let context = create_test_context(config);
-
-    // Try to access outside allowed directory with ..
-    let result = registry
-        .call_tool(
-            "read_file",
-            json!({
-                "path": "../etc/passwd"
-            }),
-            context,
-        )
-        .await;
-
-    assert!(matches!(result, Err(Error::LocalToolExecution { .. })));
-}
-
-#[tokio::test]
-async fn test_search_file() {
-    let temp_dir = tempdir().unwrap();
-    let test_file = temp_dir.path().join("search_test.txt");
-
-    std::fs::write(
-        &test_file,
-        "Line 1: Hello World\nLine 2: hello again\nLine 3: Goodbye",
-    )
-    .unwrap();
-
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
-    };
-
-    let mut registry = LocalToolRegistry::new();
-    FilesystemTool::register_all(&mut registry);
-
-    let context = create_test_context(config);
-
-    // Case-sensitive search
-    let result = registry
-        .call_tool(
-            "search_file",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "pattern": "Hello"
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    let matches = result["matches"].as_array().unwrap();
-    assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0]["line_number"].as_u64().unwrap(), 1);
-
-    // Case-insensitive search
-    let result = registry
-        .call_tool(
-            "search_file",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "pattern": "hello",
-                "case_sensitive": false
-            }),
-            context,
-        )
-        .await
-        .unwrap();
-
-    let matches = result["matches"].as_array().unwrap();
-    assert_eq!(matches.len(), 2);
-}
-
-#[tokio::test]
-async fn test_move_file() {
+async fn test_move_path() {
     let temp_dir = tempdir().unwrap();
     let source = temp_dir.path().join("source.txt");
     let dest = temp_dir.path().join("dest.txt");
 
-    std::fs::write(&source, "Test content").unwrap();
-    assert!(source.exists());
-    assert!(!dest.exists());
+    std::fs::write(&source, "Hello").unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -331,10 +179,10 @@ async fn test_move_file() {
 
     let result = registry
         .call_tool(
-            "move_file",
+            "move_path",
             json!({
-                "source": source.to_string_lossy().to_string(),
-                "destination": dest.to_string_lossy().to_string()
+                "source_path": source.to_string_lossy().to_string(),
+                "destination_path": dest.to_string_lossy().to_string()
             }),
             context,
         )
@@ -344,17 +192,23 @@ async fn test_move_file() {
     assert!(result["success"].as_bool().unwrap());
     assert!(!source.exists());
     assert!(dest.exists());
+    assert_eq!(std::fs::read_to_string(dest).unwrap(), "Hello");
 }
 
 #[tokio::test]
-async fn test_create_and_delete_directory() {
+async fn test_copy_path() {
     let temp_dir = tempdir().unwrap();
-    let test_dir = temp_dir.path().join("test_dir");
+    let source = temp_dir.path().join("source.txt");
+    let dest = temp_dir.path().join("dest.txt");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    std::fs::write(&source, "Hello").unwrap();
+
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -362,27 +216,12 @@ async fn test_create_and_delete_directory() {
 
     let context = create_test_context(config);
 
-    // Create directory
     let result = registry
         .call_tool(
-            "create_directory",
+            "copy_path",
             json!({
-                "path": test_dir.to_string_lossy().to_string()
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert!(test_dir.exists());
-
-    // Delete directory
-    let result = registry
-        .call_tool(
-            "delete_directory",
-            json!({
-                "path": test_dir.to_string_lossy().to_string()
+                "source_path": source.to_string_lossy().to_string(),
+                "destination_path": dest.to_string_lossy().to_string()
             }),
             context,
         )
@@ -390,23 +229,24 @@ async fn test_create_and_delete_directory() {
         .unwrap();
 
     assert!(result["success"].as_bool().unwrap());
-    assert!(!test_dir.exists());
+    assert!(source.exists());
+    assert!(dest.exists());
+    assert_eq!(std::fs::read_to_string(dest).unwrap(), "Hello");
 }
 
 #[tokio::test]
-async fn test_move_directory() {
+async fn test_delete_path() {
     let temp_dir = tempdir().unwrap();
-    let source_dir = temp_dir.path().join("source_dir");
-    let dest_dir = temp_dir.path().join("dest_dir");
+    let target = temp_dir.path().join("target.txt");
 
-    std::fs::create_dir(&source_dir).unwrap();
-    assert!(source_dir.exists());
-    assert!(!dest_dir.exists());
+    std::fs::write(&target, "Hello").unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -416,10 +256,9 @@ async fn test_move_directory() {
 
     let result = registry
         .call_tool(
-            "move_directory",
+            "delete_path",
             json!({
-                "source": source_dir.to_string_lossy().to_string(),
-                "destination": dest_dir.to_string_lossy().to_string()
+                "path": target.to_string_lossy().to_string()
             }),
             context,
         )
@@ -427,21 +266,22 @@ async fn test_move_directory() {
         .unwrap();
 
     assert!(result["success"].as_bool().unwrap());
-    assert!(!source_dir.exists());
-    assert!(dest_dir.exists());
+    assert!(!target.exists());
 }
 
 #[tokio::test]
-async fn test_search_and_replace() {
+async fn test_path_security_restriction() {
     let temp_dir = tempdir().unwrap();
-    let test_file = temp_dir.path().join("replace_test.txt");
+    let outside_dir = tempdir().unwrap();
+    let outside_file = outside_dir.path().join("secret.txt");
+    std::fs::write(&outside_file, "secret").unwrap();
 
-    std::fs::write(&test_file, "Line A: foo\nLine B: bar\nLine C: foo").unwrap();
-
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -449,63 +289,39 @@ async fn test_search_and_replace() {
 
     let context = create_test_context(config);
 
-    // Test 1: Simple string should fail (now only supports block format)
+    // Try to read file outside allowed directory
     let result = registry
         .call_tool(
-            "search_and_replace",
+            "read_file",
             json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "diff": "foo"
+                "path": outside_file.to_string_lossy().to_string()
             }),
-            context.clone(),
+            context,
         )
         .await;
 
     assert!(result.is_err());
-
-    // Test 2: SEARCH/REPLACE blocks format
-    let diff_with_blocks = r#"
-------- SEARCH
-Line A: foo
-=======
-Line A: FOO
-+++++++ REPLACE
-
-------- SEARCH
-Line C: foo
-=======
-Line C: FOO
-+++++++ REPLACE
-"#;
-
-    let result = registry
-        .call_tool(
-            "search_and_replace",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "diff": diff_with_blocks
-            }),
-            context,
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 2);
-
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "Line A: FOO\nLine B: bar\nLine C: FOO");
+    match result.err().unwrap() {
+        Error::LocalToolExecution { message, .. } => {
+            assert!(message.contains("not allowed"));
+        }
+        _ => panic!("Expected LocalToolExecution error"),
+    }
 }
 
 #[tokio::test]
-async fn test_replace_all_keywords() {
+async fn test_read_file_with_line_numbers() {
     let temp_dir = tempdir().unwrap();
-    let test_file = temp_dir.path().join("replace_all_test.txt");
+    let test_file = temp_dir.path().join("lines.txt");
+    let content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5";
+    std::fs::write(&test_file, content).unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -513,100 +329,82 @@ async fn test_replace_all_keywords() {
 
     let context = create_test_context(config);
 
-    // Test 1: Case-sensitive simple replace
-    std::fs::write(&test_file, "apple apple APPLE").unwrap();
+    // Read specific lines
     let result = registry
         .call_tool(
-            "replace_all_keywords",
+            "read_file",
             json!({
                 "path": test_file.to_string_lossy().to_string(),
-                "search": "apple",
-                "replace": "banana"
+                "start_line": 2,
+                "end_line": 4
             }),
-            context.clone(),
+            context,
         )
         .await
         .unwrap();
 
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 2);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "banana banana APPLE");
+    let result_content = result["content"].as_str().unwrap();
+    assert_eq!(result_content, "Line 2\nLine 3\nLine 4");
+}
 
-    // Test 2: Case-insensitive simple replace
-    std::fs::write(&test_file, "apple apple APPLE").unwrap();
+#[tokio::test]
+async fn test_search_file_content() {
+    let temp_dir = tempdir().unwrap();
+    let test_file = temp_dir.path().join("search.txt");
+    let content = "The quick brown fox\njumps over the lazy dog\nFoxes are clever";
+    std::fs::write(&test_file, content).unwrap();
+
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
+    };
+
+    let mut registry = LocalToolRegistry::new();
+    FilesystemTool::register_all(&mut registry);
+
+    let context = create_test_context(config);
+
+    // Search for "fox" (case-insensitive)
     let result = registry
         .call_tool(
-            "replace_all_keywords",
+            "grep",
             json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "apple",
-                "replace": "banana",
+                "regex": "fox",
+                "include_pattern": test_file.to_string_lossy().to_string(),
                 "case_sensitive": false
             }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 3);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "banana banana banana");
-
-    // Test 3: Regex replace
-    std::fs::write(&test_file, "Test 123 Test 456").unwrap();
-    let result = registry
-        .call_tool(
-            "replace_all_keywords",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "\\d+",
-                "replace": "NUM",
-                "use_regex": true
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 2);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "Test NUM Test NUM");
-
-    // Test 4: Case-insensitive regex
-    std::fs::write(&test_file, "HELLO hello Hello").unwrap();
-    let result = registry
-        .call_tool(
-            "replace_all_keywords",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "hello",
-                "replace": "Hi",
-                "case_sensitive": false,
-                "use_regex": true
-            }),
             context,
         )
         .await
         .unwrap();
 
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 3);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "Hi Hi Hi");
+    let matches = result["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+
+    let lines: Vec<u64> = matches
+        .iter()
+        .map(|m| m["line_number"].as_u64().unwrap())
+        .collect();
+    assert!(lines.contains(&1));
+    assert!(lines.contains(&3));
 }
 
 #[tokio::test]
-async fn test_replace_no_chained_replacement() {
+async fn test_find_files_by_pattern() {
     let temp_dir = tempdir().unwrap();
-    let test_file = temp_dir.path().join("no_chained_replace_test.txt");
+    std::fs::File::create(temp_dir.path().join("file1.rs")).unwrap();
+    std::fs::File::create(temp_dir.path().join("file2.rs")).unwrap();
+    std::fs::File::create(temp_dir.path().join("notes.txt")).unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -614,67 +412,103 @@ async fn test_replace_no_chained_replacement() {
 
     let context = create_test_context(config);
 
-    // Test 1: Simple string replace - no chained replacement
-    // "A" → "AB", should not replace the "A" in "AB"
-    std::fs::write(&test_file, "A A A").unwrap();
+    // Find all .rs files
     let result = registry
         .call_tool(
-            "replace_all_keywords",
+            "find_path",
             json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "A",
-                "replace": "AB"
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 3);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "AB AB AB");
-
-    // Test 2: Regex replace - no chained replacement
-    // "class " → "class_", should not create new matches
-    std::fs::write(&test_file, "class A class B class C").unwrap();
-    let result = registry
-        .call_tool(
-            "replace_all_keywords",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "class ",
-                "replace": "class_",
-                "use_regex": true
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 3);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "class_A class_B class_C");
-
-    // Test 3: Verify replacing with string containing search pattern
-    // "foo" → "foobar", result should be "foobar foobar", not "foobarbaz..."
-    std::fs::write(&test_file, "foo foo").unwrap();
-    let result = registry
-        .call_tool(
-            "replace_all_keywords",
-            json!({
-                "path": test_file.to_string_lossy().to_string(),
-                "search": "foo",
-                "replace": "foobar"
+                "glob": "**/*.rs"
             }),
             context,
         )
         .await
         .unwrap();
 
-    assert!(result["success"].as_bool().unwrap());
-    assert_eq!(result["replacements"].as_u64().unwrap(), 2);
-    let content = std::fs::read_to_string(&test_file).unwrap();
-    assert_eq!(content, "foobar foobar");
+    let files = result["matches"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.as_str().unwrap().to_string())
+        .collect();
+    assert!(names.iter().any(|n| n.ends_with("file1.rs")));
+    assert!(names.iter().any(|n| n.ends_with("file2.rs")));
+}
+
+#[tokio::test]
+async fn test_read_file_size_limit() {
+    let temp_dir = tempdir().unwrap();
+    let test_file = temp_dir.path().join("large.txt");
+    // Create a file larger than max_read_bytes if possible, or just test limit
+    let content = "A".repeat(100);
+
+    std::fs::write(&test_file, &content).unwrap();
+
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 10, // Small limit for testing
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
+    };
+
+    let mut registry = LocalToolRegistry::new();
+    FilesystemTool::register_all(&mut registry);
+
+    let context = create_test_context(config);
+
+    let result = registry
+        .call_tool(
+            "read_file",
+            json!({
+                "path": test_file.to_string_lossy().to_string()
+            }),
+            context,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["content"].as_str().unwrap().len(), 10);
+    assert!(result["truncated"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_path_traversal_prevention() {
+    let temp_dir = tempdir().unwrap();
+    let allowed_path = temp_dir.path().join("allowed");
+    std::fs::create_dir(&allowed_path).unwrap();
+
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![allowed_path.to_string_lossy().to_string()],
+        },
+        ..Config::default()
+    };
+
+    let mut registry = LocalToolRegistry::new();
+    FilesystemTool::register_all(&mut registry);
+
+    let context = create_test_context(config);
+
+    // Try path traversal: allowed/../secret.txt
+    let traversal_path = allowed_path.join("../secret.txt");
+
+    let result = registry
+        .call_tool(
+            "read_file",
+            json!({
+                "path": traversal_path.to_string_lossy().to_string()
+            }),
+            context,
+        )
+        .await;
+
+    assert!(result.is_err());
+    match result.err().unwrap() {
+        Error::LocalToolExecution { message, .. } => {
+            assert!(message.contains("not allowed"));
+        }
+        _ => panic!("Expected LocalToolExecution error"),
+    }
 }

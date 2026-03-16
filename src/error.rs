@@ -59,6 +59,9 @@ pub enum Error {
     #[error("Path traversal detected: {0}")]
     PathTraversal(String),
 
+    #[error("Confirmation required for tool {tool}: {message}")]
+    ConfirmationRequired { tool: String, message: String },
+
     #[error("File too large: {0} bytes (max: {1} bytes)")]
     FileTooLarge(usize, usize),
 
@@ -137,6 +140,7 @@ impl axum::response::IntoResponse for Error {
             Error::Filesystem(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Error::PathNotAllowed(_) => axum::http::StatusCode::FORBIDDEN,
             Error::PathTraversal(_) => axum::http::StatusCode::FORBIDDEN,
+            Error::ConfirmationRequired { .. } => axum::http::StatusCode::FORBIDDEN,
             Error::FileTooLarge(_, _) => axum::http::StatusCode::PAYLOAD_TOO_LARGE,
             Error::LocalToolNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::LocalToolExecution { .. } => axum::http::StatusCode::INTERNAL_SERVER_ERROR,

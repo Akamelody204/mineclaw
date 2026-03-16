@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub mod checkpoint;
 pub mod filesystem;
 pub mod registry;
+pub mod shell_detection;
 pub mod terminal;
 
 pub use self::checkpoint::{

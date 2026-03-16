@@ -1,4 +1,4 @@
-use mineclaw::tools::filesystem::parse_search_replace_blocks_from_diff;
+use mineclaw::tools::filesystem::parse_search_replace_blocks;
 
 #[test]
 fn test_parse_search_replace_blocks() {
@@ -15,7 +15,7 @@ Line C: foo
 Line C: FOO
 +++++++ REPLACE
 "#;
-    let blocks2 = parse_search_replace_blocks_from_diff(diff);
+    let blocks2 = parse_search_replace_blocks(diff);
     assert_eq!(blocks2.len(), 2);
     assert_eq!(
         blocks2[0],

@@ -1,120 +1,114 @@
-//! 文件系统工具
+//! 文件系统工具实现
 //!
-//! 提供安全的文件操作工具，包括路径检查、大小限制等安全机制。
+//! 提供读写文件、列目录、搜索等基础文件系统操作。
 
-use super::{LocalTool, ToolContext};
-use crate::config::FilesystemConfig;
 use crate::error::{Error, Result};
-use crate::models::checkpoint::CheckpointType;
+use crate::tools::{LocalTool, ToolContext};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, warn};
 
-// ==================== Path Security ====================
+// ==================== 辅助函数 ====================
 
-/// 规范化并验证路径
-fn normalize_and_validate_path(path: &str, allowed_directories: &[String]) -> Result<PathBuf> {
-    let path = Path::new(path);
+/// 规范化并验证路径是否在允许的目录范围内
+fn normalize_and_validate_path(raw_path: &str, allowed_dirs: &[String]) -> Result<PathBuf> {
+    let path = Path::new(raw_path);
 
-    if path.components().any(|c| c.as_os_str() == "..") {
-        return Err(Error::PathTraversal(path.to_string_lossy().to_string()));
-    }
-
-    let (full_path, check_dir) = if path.exists() {
-        let canonical = std::fs::canonicalize(path)?;
-        let check = if canonical.is_dir() {
-            canonical.clone()
-        } else {
-            canonical.parent().unwrap_or(&canonical).to_path_buf()
-        };
-        (canonical, check)
+    // 处理相对于当前目录的路径，或者已经是绝对路径的情况
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let parent_canonical = if parent.as_os_str().is_empty() {
-            std::env::current_dir()?
-        } else {
-            std::fs::canonicalize(parent)?
-        };
-        let full = parent_canonical.join(path.file_name().unwrap_or_default());
-        (full, parent_canonical)
+        std::env::current_dir()?.join(path)
     };
 
-    if !allowed_directories.is_empty() {
-        let allowed = allowed_directories.iter().any(|allowed| {
-            if let Ok(canonical_allowed) = std::fs::canonicalize(Path::new(allowed)) {
-                check_dir.starts_with(canonical_allowed)
-            } else {
-                false
-            }
-        });
+    // 规范化路径，处理 .. 和 .
+    let normalized = if abs_path.exists() {
+        abs_path.canonicalize()?
+    } else if let Some(parent) = abs_path.parent() {
+        if parent.exists() {
+            parent
+                .canonicalize()?
+                .join(abs_path.file_name().unwrap_or_default())
+        } else {
+            abs_path // 无法规范化，保持原样
+        }
+    } else {
+        abs_path
+    };
 
-        if !allowed {
-            return Err(Error::PathNotAllowed(
-                full_path.to_string_lossy().to_string(),
-            ));
+    // 检查是否在允许的目录中
+    if allowed_dirs.is_empty() {
+        return Ok(normalized);
+    }
+
+    let strip_unc = |p: PathBuf| -> String {
+        let s = p.to_string_lossy().to_string();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            stripped.to_string()
+        } else {
+            s
+        }
+    };
+
+    let clean_normalized = strip_unc(normalized.clone());
+
+    for allowed_dir in allowed_dirs {
+        let clean_allowed = if let Ok(allowed_path) = Path::new(allowed_dir).canonicalize() {
+            strip_unc(allowed_path)
+        } else {
+            allowed_dir.to_string()
+        };
+
+        let matches = if cfg!(windows) {
+            clean_normalized
+                .to_lowercase()
+                .starts_with(&clean_allowed.to_lowercase())
+        } else {
+            clean_normalized.starts_with(&clean_allowed)
+        };
+
+        if matches {
+            return Ok(normalized);
         }
     }
 
-    Ok(full_path)
+    Err(Error::LocalToolExecution {
+        tool: "filesystem".to_string(),
+        message: format!("Path is not allowed: {}", raw_path),
+    })
 }
 
-/// 获取文件系统配置
-fn get_filesystem_config(context: &ToolContext) -> FilesystemConfig {
+fn get_filesystem_config(context: &ToolContext) -> crate::config::FilesystemConfig {
     context.config.filesystem.clone()
 }
 
-// ==================== Checkpoint 辅助函数 ====================
-
-/// 在文件操作前自动创建 checkpoint
+/// 如果启用了 checkpoint，则创建 checkpoint
 async fn maybe_create_checkpoint(
     context: &ToolContext,
     affected_files: Vec<String>,
     description: Option<String>,
 ) -> Result<()> {
-    // 检查是否有 checkpoint manager
-    let Some(checkpoint_manager) = &context.checkpoint_manager else {
-        debug!("Checkpoint manager not available, skipping checkpoint creation");
-        return Ok(());
-    };
-
-    // 检查 checkpoint 是否启用
-    if !checkpoint_manager.config().enabled {
-        debug!("Checkpoint is disabled in config");
-        return Ok(());
-    }
-
-    // 只有在有受影响文件时才创建 checkpoint
-    if affected_files.is_empty() {
-        debug!("No affected files, skipping checkpoint");
-        return Ok(());
-    }
-
-    debug!(
-        "Creating automatic checkpoint for files: {:?}",
-        affected_files
-    );
-
-    // 创建 checkpoint
-    checkpoint_manager
-        .create_checkpoint(
+    if let Some(cm) = &context.checkpoint_manager {
+        cm.create_checkpoint(
             &context.session,
             description,
-            CheckpointType::Auto,
+            crate::models::CheckpointType::Manual,
             Some(affected_files),
         )
         .await?;
-
+    }
     Ok(())
 }
 
-// ==================== Tool Parameters and Results ====================
+// ==================== 参数和结果定义 ====================
 
 #[derive(Debug, Deserialize)]
 pub struct ReadFileParams {
     pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,7 +133,6 @@ pub struct WriteFileResult {
 #[derive(Debug, Deserialize)]
 pub struct ListDirectoryParams {
     pub path: String,
-    #[serde(default)]
     pub recursive: Option<bool>,
 }
 
@@ -156,20 +149,14 @@ pub struct ListDirectoryResult {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DeleteFileParams {
+pub struct DeletePathParams {
     pub path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DeleteFileResult {
-    pub success: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SearchFileParams {
-    pub path: String,
-    pub pattern: String,
-    #[serde(default)]
+pub struct GrepParams {
+    pub regex: String,
+    pub include_pattern: String,
     pub case_sensitive: Option<bool>,
 }
 
@@ -180,61 +167,31 @@ pub struct SearchMatch {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SearchFileResult {
+pub struct GrepResult {
     pub matches: Vec<SearchMatch>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MoveFileParams {
-    pub source: String,
-    pub destination: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MoveFileResult {
-    pub success: bool,
+pub struct MovePathParams {
+    pub source_path: String,
+    pub destination_path: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MoveDirectoryParams {
-    pub source: String,
-    pub destination: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MoveDirectoryResult {
-    pub success: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DeleteDirectoryParams {
-    pub path: String,
-    #[serde(default)]
-    pub recursive: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DeleteDirectoryResult {
-    pub success: bool,
+pub struct CopyPathParams {
+    pub source_path: String,
+    pub destination_path: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateDirectoryParams {
     pub path: String,
-    #[serde(default)]
-    pub parents: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CreateDirectoryResult {
-    pub success: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SearchAndReplaceParams {
     pub path: String,
     pub diff: String,
-    #[serde(default)]
     pub global: Option<bool>,
 }
 
@@ -249,9 +206,7 @@ pub struct ReplaceAllKeywordsParams {
     pub path: String,
     pub search: String,
     pub replace: String,
-    #[serde(default)]
     pub case_sensitive: Option<bool>,
-    #[serde(default)]
     pub use_regex: Option<bool>,
 }
 
@@ -261,7 +216,7 @@ pub struct ReplaceAllKeywordsResult {
     pub replacements: usize,
 }
 
-// ==================== Individual Tools ====================
+// ==================== 工具实现 ====================
 
 struct ReadFileTool;
 
@@ -272,17 +227,16 @@ impl LocalTool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the complete contents of a file"
+        "Read the contents of a file, with optional line range and truncation"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to read"
-                }
+                "path": { "type": "string" },
+                "start_line": { "type": "integer" },
+                "end_line": { "type": "integer" }
             },
             "required": ["path"]
         })
@@ -291,37 +245,43 @@ impl LocalTool for ReadFileTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: ReadFileParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        let metadata = std::fs::metadata(&path)?;
-        let total_bytes = metadata.len() as usize;
+        let full_content = std::fs::read_to_string(&path)?;
 
-        let content = if total_bytes > config.max_read_bytes {
-            warn!(
-                path = %path.display(),
-                file_size = total_bytes,
-                max_size = config.max_read_bytes,
-                "File too large, truncating"
-            );
-            let mut file = std::fs::File::open(&path)?;
-            let mut buffer = vec![0u8; config.max_read_bytes];
-            use std::io::Read;
-            let bytes_read = file.read(&mut buffer)?;
-            String::from_utf8_lossy(&buffer[..bytes_read]).to_string()
+        // 处理行范围
+        let content = if params.start_line.is_some() || params.end_line.is_some() {
+            let start = params.start_line.unwrap_or(1).saturating_sub(1);
+            let end = params.end_line.unwrap_or(usize::MAX);
+            full_content
+                .lines()
+                .enumerate()
+                .filter(|(i, _)| *i >= start && *i < end)
+                .map(|(_, l)| l)
+                .collect::<Vec<_>>()
+                .join("\n")
         } else {
-            std::fs::read_to_string(&path)?
+            full_content
         };
 
-        let truncated = total_bytes > config.max_read_bytes;
+        let total_bytes = content.len();
+        let mut truncated = false;
+        let final_content = if total_bytes > config.max_read_bytes {
+            truncated = true;
+            let mut end = config.max_read_bytes;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            content[..end].to_string()
+        } else {
+            content
+        };
 
-        let result = ReadFileResult {
-            content,
+        Ok(json!(ReadFileResult {
+            content: final_content,
             truncated,
             total_bytes,
-        };
-
-        Ok(serde_json::to_value(result)?)
+        }))
     }
 }
 
@@ -334,21 +294,15 @@ impl LocalTool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new file or completely overwrite an existing file"
+        "Write content to a file"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to write"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write to the file"
-                }
+                "path": { "type": "string" },
+                "content": { "type": "string" }
             },
             "required": ["path", "content"]
         })
@@ -357,34 +311,25 @@ impl LocalTool for WriteFileTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: WriteFileParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        // 为该文件操作创建自动 checkpoint
         let _ = maybe_create_checkpoint(
             &context,
-            vec![path.to_string_lossy().to_string()],
-            Some(format!(
-                "Auto checkpoint before writing to: {}",
-                params.path
-            )),
+            vec![params.path.clone()],
+            Some(format!("Before writing to {}", params.path)),
         )
         .await;
 
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-        {
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         std::fs::write(&path, &params.content)?;
 
-        let result = WriteFileResult {
+        Ok(json!(WriteFileResult {
             success: true,
             bytes_written: params.content.len(),
-        };
-
-        Ok(serde_json::to_value(result)?)
+        }))
     }
 }
 
@@ -397,22 +342,15 @@ impl LocalTool for ListDirectoryTool {
     }
 
     fn description(&self) -> &str {
-        "List the contents of a directory"
+        "List contents of a directory"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the directory to list"
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "description": "Whether to list recursively",
-                    "default": false
-                }
+                "path": { "type": "string" },
+                "recursive": { "type": "boolean" }
             },
             "required": ["path"]
         })
@@ -421,344 +359,235 @@ impl LocalTool for ListDirectoryTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: ListDirectoryParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
-        let abs_dir_path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
+        let abs_dir = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
         let mut entries = Vec::new();
-
         if params.recursive.unwrap_or(false) {
-            for entry in walkdir::WalkDir::new(&abs_dir_path) {
+            for entry in walkdir::WalkDir::new(&abs_dir).min_depth(1) {
                 let entry = entry?;
-                if entry.path() == abs_dir_path {
-                    continue;
-                }
-                let file_type = entry.file_type();
-
-                let abs_path = entry.path();
-                // 计算相对于 abs_dir_path 的路径
-                let rel_to_abs_dir = abs_path.strip_prefix(&abs_dir_path).unwrap_or(abs_path);
-                // 拼接用户原始路径
-                let final_path = Path::new(&params.path).join(rel_to_abs_dir);
-
+                let rel_path = entry.path().strip_prefix(&abs_dir).unwrap_or(entry.path());
+                let display_path = Path::new(&params.path).join(rel_path);
                 entries.push(DirectoryEntry {
                     name: entry.file_name().to_string_lossy().to_string(),
-                    path: final_path.to_string_lossy().to_string(),
-                    is_dir: file_type.is_dir(),
+                    path: display_path.to_string_lossy().to_string(),
+                    is_dir: entry.file_type().is_dir(),
                 });
             }
         } else {
-            for entry in std::fs::read_dir(&abs_dir_path)? {
+            for entry in std::fs::read_dir(&abs_dir)? {
                 let entry = entry?;
-                let file_type = entry.file_type()?;
                 let file_name = entry.file_name();
-
-                // 拼接用户原始路径
-                let final_path = Path::new(&params.path).join(&file_name);
-
+                let display_path = Path::new(&params.path).join(&file_name);
                 entries.push(DirectoryEntry {
                     name: file_name.to_string_lossy().to_string(),
-                    path: final_path.to_string_lossy().to_string(),
-                    is_dir: file_type.is_dir(),
+                    path: display_path.to_string_lossy().to_string(),
+                    is_dir: entry.file_type()?.is_dir(),
                 });
             }
         }
 
-        let result = ListDirectoryResult { entries };
-
-        Ok(serde_json::to_value(result)?)
+        Ok(json!(ListDirectoryResult { entries }))
     }
 }
 
-struct DeleteFileTool;
+struct DeletePathTool;
 
 #[async_trait]
-impl LocalTool for DeleteFileTool {
+impl LocalTool for DeletePathTool {
     fn name(&self) -> &str {
-        "delete_file"
+        "delete_path"
     }
 
     fn description(&self) -> &str {
-        "Delete a file"
+        "Delete a file or directory"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to delete"
-                }
-            },
+            "properties": { "path": { "type": "string" } },
             "required": ["path"]
         })
     }
 
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let params: DeleteFileParams = serde_json::from_value(arguments)?;
+        let params: DeletePathParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        // 在修改前创建 checkpoint
         let _ = maybe_create_checkpoint(
             &context,
             vec![params.path.clone()],
-            Some(format!("Before deleting file: {}", params.path)),
+            Some(format!("Before deleting {}", params.path)),
         )
         .await;
 
-        std::fs::remove_file(&path)?;
-
-        let result = DeleteFileResult { success: true };
-
-        Ok(serde_json::to_value(result)?)
-    }
-}
-
-struct SearchFileTool;
-
-#[async_trait]
-impl LocalTool for SearchFileTool {
-    fn name(&self) -> &str {
-        "search_file"
-    }
-
-    fn description(&self) -> &str {
-        "Search for a pattern in a file"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to search"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "Regex pattern to search for"
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Whether the search is case-sensitive",
-                    "default": true
-                }
-            },
-            "required": ["path", "pattern"]
-        })
-    }
-
-    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let params: SearchFileParams = serde_json::from_value(arguments)?;
-        let config = get_filesystem_config(&context);
-
-        let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
-
-        let content = std::fs::read_to_string(&path)?;
-
-        let pattern = if params.case_sensitive.unwrap_or(true) {
-            regex::Regex::new(&params.pattern)?
-        } else {
-            regex::Regex::new(&format!("(?i){}", params.pattern))?
-        };
-
-        let mut matches = Vec::new();
-
-        for (line_number, line) in content.lines().enumerate() {
-            if pattern.is_match(line) {
-                matches.push(SearchMatch {
-                    line_number: line_number + 1,
-                    content: line.to_string(),
-                });
-            }
-        }
-
-        let result = SearchFileResult { matches };
-
-        Ok(serde_json::to_value(result)?)
-    }
-}
-
-struct MoveFileTool;
-
-#[async_trait]
-impl LocalTool for MoveFileTool {
-    fn name(&self) -> &str {
-        "move_file"
-    }
-
-    fn description(&self) -> &str {
-        "Move or rename a file"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "Source file path"
-                },
-                "destination": {
-                    "type": "string",
-                    "description": "Destination file path"
-                }
-            },
-            "required": ["source", "destination"]
-        })
-    }
-
-    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let params: MoveFileParams = serde_json::from_value(arguments)?;
-        let config = get_filesystem_config(&context);
-
-        let source = normalize_and_validate_path(&params.source, &config.allowed_directories)?;
-        let destination =
-            normalize_and_validate_path(&params.destination, &config.allowed_directories)?;
-
-        // 在修改前创建 checkpoint
-        let _ = maybe_create_checkpoint(
-            &context,
-            vec![params.source.clone(), params.destination.clone()],
-            Some(format!(
-                "Before moving file: {} -> {}",
-                params.source, params.destination
-            )),
-        )
-        .await;
-
-        if let Some(parent) = destination.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::rename(&source, &destination)?;
-
-        let result = MoveFileResult { success: true };
-
-        Ok(serde_json::to_value(result)?)
-    }
-}
-
-struct MoveDirectoryTool;
-
-#[async_trait]
-impl LocalTool for MoveDirectoryTool {
-    fn name(&self) -> &str {
-        "move_directory"
-    }
-
-    fn description(&self) -> &str {
-        "Move or rename a directory"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "Source directory path"
-                },
-                "destination": {
-                    "type": "string",
-                    "description": "Destination directory path"
-                }
-            },
-            "required": ["source", "destination"]
-        })
-    }
-
-    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let params: MoveDirectoryParams = serde_json::from_value(arguments)?;
-        let config = get_filesystem_config(&context);
-
-        let source = normalize_and_validate_path(&params.source, &config.allowed_directories)?;
-        let destination =
-            normalize_and_validate_path(&params.destination, &config.allowed_directories)?;
-
-        // 在修改前创建 checkpoint
-        let _ = maybe_create_checkpoint(
-            &context,
-            vec![params.source.clone(), params.destination.clone()],
-            Some(format!(
-                "Before moving directory: {} -> {}",
-                params.source, params.destination
-            )),
-        )
-        .await;
-
-        if let Some(parent) = destination.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::rename(&source, &destination)?;
-
-        let result = MoveDirectoryResult { success: true };
-
-        Ok(serde_json::to_value(result)?)
-    }
-}
-
-struct DeleteDirectoryTool;
-
-#[async_trait]
-impl LocalTool for DeleteDirectoryTool {
-    fn name(&self) -> &str {
-        "delete_directory"
-    }
-
-    fn description(&self) -> &str {
-        "Delete a directory"
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the directory to delete"
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "description": "Whether to delete recursively",
-                    "default": false
-                }
-            },
-            "required": ["path"]
-        })
-    }
-
-    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let params: DeleteDirectoryParams = serde_json::from_value(arguments)?;
-        let config = get_filesystem_config(&context);
-
-        let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
-
-        // 在修改前创建 checkpoint
-        let _ = maybe_create_checkpoint(
-            &context,
-            vec![params.path.clone()],
-            Some(format!("Before deleting directory: {}", params.path)),
-        )
-        .await;
-
-        if params.recursive.unwrap_or(false) {
+        if path.is_dir() {
             std::fs::remove_dir_all(&path)?;
         } else {
-            std::fs::remove_dir(&path)?;
+            std::fs::remove_file(&path)?;
         }
 
-        let result = DeleteDirectoryResult { success: true };
-
-        Ok(serde_json::to_value(result)?)
+        Ok(json!({ "success": true }))
     }
+}
+
+struct GrepTool;
+
+#[async_trait]
+impl LocalTool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn description(&self) -> &str {
+        "Search for a regex pattern in a file"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "regex": { "type": "string" },
+                "include_pattern": { "type": "string" },
+                "case_sensitive": { "type": "boolean" }
+            },
+            "required": ["regex", "include_pattern"]
+        })
+    }
+
+    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
+        let params: GrepParams = serde_json::from_value(arguments)?;
+        let config = get_filesystem_config(&context);
+        let path =
+            normalize_and_validate_path(&params.include_pattern, &config.allowed_directories)?;
+
+        let content = std::fs::read_to_string(&path)?;
+        let re = if params.case_sensitive.unwrap_or(false) {
+            regex::Regex::new(&params.regex)?
+        } else {
+            regex::Regex::new(&format!("(?i){}", params.regex))?
+        };
+
+        let matches: Vec<SearchMatch> = content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| re.is_match(line))
+            .map(|(i, line)| SearchMatch {
+                line_number: i + 1,
+                content: line.to_string(),
+            })
+            .collect();
+
+        Ok(json!(GrepResult { matches }))
+    }
+}
+
+struct MovePathTool;
+
+#[async_trait]
+impl LocalTool for MovePathTool {
+    fn name(&self) -> &str {
+        "move_path"
+    }
+
+    fn description(&self) -> &str {
+        "Move or rename a file or directory"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "source_path": { "type": "string" },
+                "destination_path": { "type": "string" }
+            },
+            "required": ["source_path", "destination_path"]
+        })
+    }
+
+    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
+        let params: MovePathParams = serde_json::from_value(arguments)?;
+        let config = get_filesystem_config(&context);
+        let src = normalize_and_validate_path(&params.source_path, &config.allowed_directories)?;
+        let dst =
+            normalize_and_validate_path(&params.destination_path, &config.allowed_directories)?;
+
+        let _ = maybe_create_checkpoint(
+            &context,
+            vec![params.source_path.clone(), params.destination_path.clone()],
+            Some(format!(
+                "Move {} to {}",
+                params.source_path, params.destination_path
+            )),
+        )
+        .await;
+
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(src, dst)?;
+
+        Ok(json!({ "success": true }))
+    }
+}
+
+struct CopyPathTool;
+
+#[async_trait]
+impl LocalTool for CopyPathTool {
+    fn name(&self) -> &str {
+        "copy_path"
+    }
+
+    fn description(&self) -> &str {
+        "Copy a file or directory"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "source_path": { "type": "string" },
+                "destination_path": { "type": "string" }
+            },
+            "required": ["source_path", "destination_path"]
+        })
+    }
+
+    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
+        let params: CopyPathParams = serde_json::from_value(arguments)?;
+        let config = get_filesystem_config(&context);
+        let src = normalize_and_validate_path(&params.source_path, &config.allowed_directories)?;
+        let dst =
+            normalize_and_validate_path(&params.destination_path, &config.allowed_directories)?;
+
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(src, dst)?;
+        }
+
+        Ok(json!({ "success": true }))
+    }
+}
+
+/// 辅助函数：递归复制目录
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 struct CreateDirectoryTool;
@@ -770,23 +599,13 @@ impl LocalTool for CreateDirectoryTool {
     }
 
     fn description(&self) -> &str {
-        "Create a directory"
+        "Create a new directory"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the directory to create"
-                },
-                "parents": {
-                    "type": "boolean",
-                    "description": "Whether to create parent directories",
-                    "default": false
-                }
-            },
+            "properties": { "path": { "type": "string" } },
             "required": ["path"]
         })
     }
@@ -794,72 +613,93 @@ impl LocalTool for CreateDirectoryTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: CreateDirectoryParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        if params.parents.unwrap_or(false) {
-            std::fs::create_dir_all(&path)?;
-        } else {
-            std::fs::create_dir(&path)?;
+        std::fs::create_dir_all(path)?;
+        Ok(json!({ "success": true }))
+    }
+}
+
+struct FindPathTool;
+
+#[async_trait]
+impl LocalTool for FindPathTool {
+    fn name(&self) -> &str {
+        "find_path"
+    }
+
+    fn description(&self) -> &str {
+        "Find files by glob pattern"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "glob": { "type": "string" } },
+            "required": ["glob"]
+        })
+    }
+
+    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
+        let glob = arguments["glob"]
+            .as_str()
+            .ok_or_else(|| Error::LocalToolExecution {
+                tool: "find_path".to_string(),
+                message: "Missing glob parameter".to_string(),
+            })?;
+        let config = get_filesystem_config(&context);
+
+        let mut matches = Vec::new();
+        for allowed_dir in &config.allowed_directories {
+            let root = Path::new(allowed_dir);
+            if !root.exists() {
+                continue;
+            }
+
+            for entry in walkdir::WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path_str = entry.path().to_string_lossy();
+                // 极简实现：仅检查后缀或包含
+                if let Some(ext) = glob.strip_prefix("**/*") {
+                    if path_str.ends_with(ext) {
+                        matches.push(path_str.to_string());
+                    }
+                } else if path_str.contains(glob) {
+                    matches.push(path_str.to_string());
+                }
+            }
         }
 
-        let result = CreateDirectoryResult { success: true };
-
-        Ok(serde_json::to_value(result)?)
+        Ok(json!({ "matches": matches }))
     }
 }
 
 struct SearchAndReplaceTool;
 
-/// 从 diff 文本中提取 SEARCH/REPLACE 块
-pub fn parse_search_replace_blocks_from_diff(diff: &str) -> Vec<(String, String)> {
+pub fn parse_search_replace_blocks(diff: &str) -> Vec<(String, String)> {
     let mut blocks = Vec::new();
     let mut lines = diff.lines().peekable();
-
     while let Some(line) = lines.next() {
         if line.trim() == "------- SEARCH" {
-            let mut search_content = Vec::new();
-            let mut replace_content = Vec::new();
-
-            // 读取 SEARCH 部分直到 =======
-            for line in lines.by_ref() {
-                if line.trim() == "=======" {
+            let mut search = Vec::new();
+            let mut replace = Vec::new();
+            for l in lines.by_ref() {
+                if l.trim() == "=======" {
                     break;
                 }
-                search_content.push(line);
+                search.push(l);
             }
-
-            // 读取 REPLACE 部分直到 +++++++ REPLACE
-            for line in lines.by_ref() {
-                if line.trim() == "+++++++ REPLACE" {
+            for l in lines.by_ref() {
+                if l.trim() == "+++++++ REPLACE" {
                     break;
                 }
-                replace_content.push(line);
+                replace.push(l);
             }
-
-            // 移除开头和末尾的空行
-            while search_content.first().is_some_and(|l| l.trim().is_empty()) {
-                search_content.remove(0);
-            }
-            while search_content.last().is_some_and(|l| l.trim().is_empty()) {
-                search_content.pop();
-            }
-            while replace_content.first().is_some_and(|l| l.trim().is_empty()) {
-                replace_content.remove(0);
-            }
-            while replace_content.last().is_some_and(|l| l.trim().is_empty()) {
-                replace_content.pop();
-            }
-
-            let search_str = search_content.join("\n");
-            let replace_str = replace_content.join("\n");
-
-            if !search_str.is_empty() {
-                blocks.push((search_str, replace_str));
-            }
+            blocks.push((search.join("\n"), replace.join("\n")));
         }
     }
-
     blocks
 }
 
@@ -870,26 +710,16 @@ impl LocalTool for SearchAndReplaceTool {
     }
 
     fn description(&self) -> &str {
-        "Search and replace text in a file using SEARCH/REPLACE block format only."
+        "Replace blocks of text in a file"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file"
-                },
-                "diff": {
-                    "type": "string",
-                    "description": "SEARCH/REPLACE block(s) with format: ------- SEARCH\\nold content\\n=======\\nnew content\\n+++++++ REPLACE"
-                },
-                "global": {
-                    "type": "boolean",
-                    "description": "Whether to replace all occurrences within each block",
-                    "default": true
-                }
+                "path": { "type": "string" },
+                "diff": { "type": "string" },
+                "global": { "type": "boolean" }
             },
             "required": ["path", "diff"]
         })
@@ -898,61 +728,34 @@ impl LocalTool for SearchAndReplaceTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: SearchAndReplaceParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        // 在修改前创建 checkpoint
         let _ = maybe_create_checkpoint(
             &context,
             vec![params.path.clone()],
-            Some(format!(
-                "Before search and replace in file: {}",
-                params.path
-            )),
+            Some(format!("Search/Replace in {}", params.path)),
         )
         .await;
 
-        // 检查是否是有效的 SEARCH/REPLACE 块格式
-        let search_has_blocks = params.diff.contains("------- SEARCH")
-            && params.diff.contains("=======")
-            && params.diff.contains("+++++++ REPLACE");
-
-        if !search_has_blocks {
-            return Err(Error::LocalToolExecution {
-                tool: "search_and_replace".to_string(),
-                message: "search_and_replace requires SEARCH/REPLACE block format. Use: ------- SEARCH\\nold\\n=======\\nnew\\n+++++++ REPLACE".to_string()
-            });
-        }
-
         let mut content = std::fs::read_to_string(&path)?;
-        let mut total_replacements = 0;
+        let blocks = parse_search_replace_blocks(&params.diff);
+        let mut replacements = 0;
 
-        let blocks = parse_search_replace_blocks_from_diff(&params.diff);
-        let global = params.global.unwrap_or(true);
-
-        for (search_str, replace_str) in blocks {
-            if search_str.is_empty() {
-                continue;
-            }
-
-            if global {
-                let count = content.matches(&search_str).count();
-                content = content.replace(&search_str, &replace_str);
-                total_replacements += count;
-            } else if let Some(index) = content.find(&search_str) {
-                content.replace_range(index..index + search_str.len(), &replace_str);
-                total_replacements += 1;
+        for (search, replace) in blocks {
+            if params.global.unwrap_or(true) {
+                replacements += content.matches(&search).count();
+                content = content.replace(&search, &replace);
+            } else if let Some(pos) = content.find(&search) {
+                content.replace_range(pos..pos + search.len(), &replace);
+                replacements += 1;
             }
         }
 
-        std::fs::write(&path, &content)?;
-
-        let result = SearchAndReplaceResult {
+        std::fs::write(&path, content)?;
+        Ok(json!(SearchAndReplaceResult {
             success: true,
-            replacements: total_replacements,
-        };
-
-        Ok(serde_json::to_value(result)?)
+            replacements
+        }))
     }
 }
 
@@ -965,35 +768,18 @@ impl LocalTool for ReplaceAllKeywordsTool {
     }
 
     fn description(&self) -> &str {
-        "Find and replace all occurrences of a keyword in a file"
+        "Replace all occurrences of a keyword or pattern"
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
+        json!({
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file"
-                },
-                "search": {
-                    "type": "string",
-                    "description": "Keyword or regex pattern to search for"
-                },
-                "replace": {
-                    "type": "string",
-                    "description": "Replacement text"
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Whether the search is case-sensitive",
-                    "default": true
-                },
-                "use_regex": {
-                    "type": "boolean",
-                    "description": "Whether to use regex for matching",
-                    "default": false
-                }
+                "path": { "type": "string" },
+                "search": { "type": "string" },
+                "replace": { "type": "string" },
+                "case_sensitive": { "type": "boolean" },
+                "use_regex": { "type": "boolean" }
             },
             "required": ["path", "search", "replace"]
         })
@@ -1002,84 +788,62 @@ impl LocalTool for ReplaceAllKeywordsTool {
     async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
         let params: ReplaceAllKeywordsParams = serde_json::from_value(arguments)?;
         let config = get_filesystem_config(&context);
-
         let path = normalize_and_validate_path(&params.path, &config.allowed_directories)?;
 
-        // 在修改前创建 checkpoint
         let _ = maybe_create_checkpoint(
             &context,
             vec![params.path.clone()],
-            Some(format!(
-                "Before replacing all keywords in file: {}",
-                params.path
-            )),
+            Some(format!("Replace keyword in {}", params.path)),
         )
         .await;
-        let mut content = std::fs::read_to_string(&path)?;
-        let case_sensitive = params.case_sensitive.unwrap_or(true);
-        let use_regex = params.use_regex.unwrap_or(false);
 
-        let replacements = if use_regex {
-            let pattern = if case_sensitive {
+        let mut content = std::fs::read_to_string(&path)?;
+        let replacements;
+
+        if params.use_regex.unwrap_or(false) {
+            let re = if params.case_sensitive.unwrap_or(true) {
                 regex::Regex::new(&params.search)?
             } else {
                 regex::Regex::new(&format!("(?i){}", params.search))?
             };
-            let count = pattern.find_iter(&content).count();
-            content = pattern.replace_all(&content, &params.replace).to_string();
-            count
-        } else if case_sensitive {
-            let count = content.matches(&params.search).count();
-            content = content.replace(&params.search, &params.replace);
-            count
+            replacements = re.find_iter(&content).count();
+            content = re
+                .replace_all(&content, params.replace.as_str())
+                .to_string();
         } else {
-            let mut result = String::new();
-            let mut last_end = 0;
-            let search_lower = params.search.to_lowercase();
-            let content_lower = content.to_lowercase();
-            let mut count = 0;
-
-            while let Some(start) = content_lower[last_end..].find(&search_lower) {
-                let real_start = last_end + start;
-                let real_end = real_start + params.search.len();
-                result.push_str(&content[last_end..real_start]);
-                result.push_str(&params.replace);
-                last_end = real_end;
-                count += 1;
+            if params.case_sensitive.unwrap_or(true) {
+                replacements = content.matches(&params.search).count();
+                content = content.replace(&params.search, &params.replace);
+            } else {
+                let re = regex::Regex::new(&format!("(?i){}", regex::escape(&params.search)))?;
+                replacements = re.find_iter(&content).count();
+                content = re
+                    .replace_all(&content, params.replace.as_str())
+                    .to_string();
             }
-            result.push_str(&content[last_end..]);
-            content = result;
-            count
-        };
+        }
 
-        std::fs::write(&path, &content)?;
-
-        let result = ReplaceAllKeywordsResult {
+        std::fs::write(&path, content)?;
+        Ok(json!(ReplaceAllKeywordsResult {
             success: true,
-            replacements,
-        };
-
-        Ok(serde_json::to_value(result)?)
+            replacements
+        }))
     }
 }
 
-// ==================== FilesystemTool ====================
-
-/// 文件系统工具集合
 pub struct FilesystemTool;
 
 impl FilesystemTool {
-    /// 注册所有文件系统工具到注册表
     pub fn register_all(registry: &mut super::registry::LocalToolRegistry) {
         registry.register(Arc::new(ReadFileTool));
         registry.register(Arc::new(WriteFileTool));
         registry.register(Arc::new(ListDirectoryTool));
-        registry.register(Arc::new(DeleteFileTool));
-        registry.register(Arc::new(SearchFileTool));
-        registry.register(Arc::new(MoveFileTool));
-        registry.register(Arc::new(MoveDirectoryTool));
-        registry.register(Arc::new(DeleteDirectoryTool));
+        registry.register(Arc::new(DeletePathTool));
+        registry.register(Arc::new(GrepTool));
+        registry.register(Arc::new(MovePathTool));
+        registry.register(Arc::new(CopyPathTool));
         registry.register(Arc::new(CreateDirectoryTool));
+        registry.register(Arc::new(FindPathTool));
         registry.register(Arc::new(SearchAndReplaceTool));
         registry.register(Arc::new(ReplaceAllKeywordsTool));
     }
