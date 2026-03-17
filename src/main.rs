@@ -7,7 +7,10 @@ use agentsql::SqlBackend;
 use axum::serve;
 use mineclaw::checkpoint::CheckpointManager;
 use mineclaw::mcp::{McpServerManager, ToolExecutor};
-use mineclaw::tools::{LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool};
+use mineclaw::tools::{
+    LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool,
+    terminal::TerminalTool,
+};
 use mineclaw::{
     AppState, Config, SessionRepository, ToolCoordinator, create_provider, create_router,
 };
@@ -33,10 +36,11 @@ async fn main() -> mineclaw::Result<()> {
     info!("Initializing AgentFS...");
     // 确保数据库文件的父目录存在
     if let Some(parent_dir) = std::path::Path::new(&config.agentfs_db_path).parent()
-        && !parent_dir.exists() {
-            std::fs::create_dir_all(parent_dir)?;
-            info!("Created database directory: {:?}", parent_dir);
-        }
+        && !parent_dir.exists()
+    {
+        std::fs::create_dir_all(parent_dir)?;
+        info!("Created database directory: {:?}", parent_dir);
+    }
     let backend = SqlBackend::sqlite(&config.agentfs_db_path).await?;
     let agent_fs = Arc::new(AgentFS::new(Box::new(backend), "mineclaw", "/mineclaw").await?);
     info!("AgentFS initialized successfully");
@@ -88,6 +92,7 @@ async fn main() -> mineclaw::Result<()> {
     let mut local_tool_registry = LocalToolRegistry::new();
     FilesystemTool::register_all(&mut local_tool_registry);
     CheckpointTools::register_all(&mut local_tool_registry);
+    TerminalTool::register_all(&mut local_tool_registry);
     info!(
         "Local tools registered: {:?}",
         local_tool_registry

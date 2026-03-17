@@ -32,6 +32,9 @@ pub enum Error {
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    #[error("Invalid session state: {0}")]
+    SessionInvalidState(String),
+
     #[error("Message not found: {0}")]
     MessageNotFound(String),
 
@@ -70,6 +73,9 @@ pub enum Error {
 
     #[error("Local tool execution error: {tool}: {message}")]
     LocalToolExecution { tool: String, message: String },
+
+    #[error("Confirmation required for tool {tool}: {message}")]
+    ConfirmationRequired { tool: String, message: String },
 
     #[error("Checkpoint error: {0}")]
     Checkpoint(String),
@@ -143,6 +149,7 @@ impl axum::response::IntoResponse for Error {
             Error::AddrParse(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::Llm(_) => axum::http::StatusCode::BAD_GATEWAY,
             Error::SessionNotFound(_) => axum::http::StatusCode::NOT_FOUND,
+            Error::SessionInvalidState(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::MessageNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::InvalidInput(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::InvalidConfig(_) => axum::http::StatusCode::BAD_REQUEST,
@@ -156,6 +163,7 @@ impl axum::response::IntoResponse for Error {
             Error::FileTooLarge(_, _) => axum::http::StatusCode::PAYLOAD_TOO_LARGE,
             Error::LocalToolNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::LocalToolExecution { .. } => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Error::ConfirmationRequired { .. } => axum::http::StatusCode::BAD_REQUEST,
             Error::Checkpoint(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Error::CheckpointNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::CheckpointAlreadyExists(_) => axum::http::StatusCode::CONFLICT,
