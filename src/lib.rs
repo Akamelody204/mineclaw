@@ -21,7 +21,7 @@ pub use agent::AgentExecutor;
 pub use api::create_router;
 pub use config::Config;
 pub use error::{Error, Result};
-pub use llm::create_provider;
+pub use llm::{LlmProviderRegistry, create_provider};
 pub use models::SessionRepository;
 pub use state::AppState;
 pub use tool_coordinator::ToolCoordinator;

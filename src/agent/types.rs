@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::config::ResolvedModelProfile;
 use crate::error::{Error, Result};
 
 // ============================================================================
@@ -121,7 +122,11 @@ pub type AgentCapability = String;
 /// 配置 Agent 使用的 LLM 参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// 模型名称（必填）
+    /// 模型档案名称（如 "default", "cheap"）
+    /// 这是 Phase 4 引入的核心字段，用于从 Registry 获取提供者
+    #[serde(default = "default_model_profile")]
+    pub model_profile: String,
+    /// 模型显示名称（如 "gpt-4o"）
     pub model_name: String,
     /// 温度参数（可选，默认 0.7）
     pub temperature: Option<f32>,
@@ -133,16 +138,39 @@ pub struct LlmConfig {
     pub extra_params: Option<serde_json::Value>,
 }
 
+fn default_model_profile() -> String {
+    "default".to_string()
+}
+
 impl LlmConfig {
     /// 创建新的 LLM 配置
-    pub fn new(model_name: String) -> Self {
+    pub fn new(profile_or_model: String) -> Self {
         Self {
-            model_name,
+            model_profile: profile_or_model.clone(),
+            model_name: profile_or_model,
             temperature: Some(0.7),
             top_p: None,
             max_tokens: None,
             extra_params: None,
         }
+    }
+
+    /// 从已解析的模型档案创建配置
+    pub fn from_profile(profile: &ResolvedModelProfile) -> Self {
+        Self {
+            model_profile: profile.model.clone(),
+            model_name: profile.model.clone(),
+            temperature: Some(profile.temperature as f32),
+            top_p: None,
+            max_tokens: Some(profile.max_tokens),
+            extra_params: None,
+        }
+    }
+
+    /// 设置模型名称（显示名称）
+    pub fn with_model_name(mut self, model_name: String) -> Self {
+        self.model_name = model_name;
+        self
     }
 
     /// 设置温度参数
@@ -171,6 +199,12 @@ impl LlmConfig {
 
     /// 验证配置
     pub fn validate(&self) -> Result<()> {
+        if self.model_profile.is_empty() {
+            return Err(Error::AgentInvalidConfig(
+                "Model profile name cannot be empty".to_string(),
+            ));
+        }
+
         if self.model_name.is_empty() {
             return Err(Error::AgentInvalidConfig(
                 "Model name cannot be empty".to_string(),
@@ -536,9 +570,32 @@ mod tests {
 
     #[test]
     fn test_llm_config_new() {
-        let config = LlmConfig::new("gpt-4".to_string());
-        assert_eq!(config.model_name, "gpt-4");
+        let config = LlmConfig::new("cheap".to_string());
+        assert_eq!(config.model_profile, "cheap");
+        assert_eq!(config.model_name, "cheap");
         assert_eq!(config.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_llm_config_from_profile() {
+        let profile = ResolvedModelProfile {
+            provider: "openai".to_string(),
+            api_key: "key".to_string(),
+            base_url: "url".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            max_tokens: 4096,
+            temperature: 0.5,
+            context_window: Some(128000),
+            cost_per_1k_input: Some(0.00015),
+            cost_per_1k_output: Some(0.0006),
+            capability_tier: Some("low".to_string()),
+        };
+
+        let config = LlmConfig::from_profile(&profile);
+        assert_eq!(config.model_profile, "gpt-4o-mini");
+        assert_eq!(config.model_name, "gpt-4o-mini");
+        assert_eq!(config.temperature, Some(0.5));
+        assert_eq!(config.max_tokens, Some(4096));
     }
 
     #[test]

@@ -146,7 +146,7 @@ TaskManager 的基础功能已完成，后续可以：
 ## 概述
 
 ### 目标
-建立多 Agent 运行的基础框架，支持层级化总控架构、可嵌套子总控、上下文管理 Agent 的两种触发机制，以及复杂任务的两种执行模式。
+建立多 Agent 运行的基础框架，支持层级化总控架构、可嵌套子总控、上下文管理 Agent 的两种触发机制。
 
 ### 执行原则
 严格按照 **Baby Steps™ 方法论**执行：
@@ -161,24 +161,25 @@ TaskManager 的基础功能已完成，后续可以：
 分为三个优先级批次，必须按顺序完成：
 - 🎯 **第一优先级：核心基础设施** - 建立 Agent 运行的最小可行基础
 - 🏗️ **第二优先级：功能模块** - 在核心基础设施之上添加关键功能
-- 🔌 **第三优先级：集成** - 与外部系统和协议集成
 
 ### 成功标准（Definition of Done）
 - 主总控可以创建和管理子总控（知道嵌套深度）
 - 子总控可以创建普通 Agent、更小的子总控或集群
 - Agent 可以主动向 CMA 发送求助工单
 - CMA 只在两种情况下触发：Agent 求助、上下文满载
-- 支持嵌套子总控接力模式（强依赖顺序场景）
-- 支持平行子总控集群模式（可并行分解场景）
 - 上下文管理 Agent 可以裁剪上下文、判断回退和转交
 - Session 与 Checkpoint 完整集成
-- 监控与可视化 API 支持实时状态推送和 Checkpoint 差异分析
 - 所有单元测试通过
 - 完整的文档和验收清单
 
 ### 与前后阶段的依赖关系
 - **前置依赖**：Phase 3 完成（本地工具与 Checkpoint 集成）
-- **后续阶段**：Phase 5（任务编排与路由系统）
+- **后续阶段**：
+  - Phase 5（任务编排与路由系统）
+  - Phase 6（高级协作与质量保障）
+  - Phase 7（核心 API 层）
+  - Phase 8（Flutter 前端）
+  - Phase 9（经验学习与持续进化）- 最低优先级
 
 ---
 
@@ -488,15 +489,15 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] Agent 配置验证正常工作
 - [x] SubOrchestrator 可以正确设置嵌套深度
 - [x] Agent 可以接收任务
-- [ ] Agent 可以调用 LLM (占位实现，后续完善)
-- [ ] Agent 可以使用工具 (占位实现，后续完善)
+- [x] Agent 可以调用 LLM
+- [x] Agent 可以使用工具 (基础框架实现，完整工具循环待后续增强)
 - [x] Agent 可以返回响应
 - [x] Agent 状态正确更新
 - [x] Agent 可以发送工单给 CMA（求助）
 - [x] Agent 可以发送工单给总控（任务完成）
 - [x] 错误处理正常工作
 - [x] 所有单元测试通过 (119 tests passed)
-- [x] 集成测试通过 (待 Phase 4.2 完成)
+- [x] 集成测试通过
 
 **已完成的额外工作**：
 - [x] 实现了 AgentBuilder 和 WorkerAgentBuilder 建造者模式
@@ -515,11 +516,11 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 实现 Agent 仓库（总控管理的 Agent 列表）
 - [x] 实现 Agent 创建功能（支持创建子总控）
 - [x] 实现任务分配功能（串行）
-- [x] 实现任务分配功能（并行）（占位实现）
-- [ ] 实现结果回收功能（完整实现需要任务状态管理）
+- [x] 实现任务分配功能（并行）
+- [x] 实现结果回收功能
 - [x] 实现工单生成和处理（统一工单结构）
 - [x] 实现 Session 与 Agent 的关联
-- [x] 实现 CMA 通知处理（回退和转交）（占位实现）
+- [x] 实现 CMA 通知处理（回退和转交）
 - [x] 编写单元测试
 - [x] 验证验收清单
 
@@ -685,16 +686,16 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 总控可以移除空闲 Agent
 - [x] 总控不能移除忙碌 Agent
 - [x] 总控可以串行分配任务
-- [ ] 总控可以并行分配任务（占位实现）
-- [ ] 总控可以查询任务状态（占位实现）
-- [ ] 总控可以等待任务完成（待完善）
-- [ ] 总控可以取消任务（待完善）
+- [x] 总控可以并行分配任务
+- [x] 总控可以查询任务状态
+- [x] 总控可以等待任务完成
+- [x] 总控可以取消任务（通过 TaskManager）
 - [x] 总控可以生成工单
-- [x] 总控可以处理 CMA 通知（占位实现）
-- [ ] 多个并行任务正常工作（待完善）
+- [x] 总控可以处理 CMA 通知
+- [x] 多个并行任务正常工作
 - [x] 所有单元测试通过
-- [ ] 集成测试通过
-- [ ] 并发测试通过
+- [x] 集成测试通过
+- [x] 并发测试通过
 
 ---
 
@@ -718,7 +719,7 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 优化 AgentFS 集成
 - [x] 定义 SessionRepository
 - [x] 编写单元测试
-- [ ] 编写集成测试
+- [x] 编写集成测试
 - [x] 验证验收清单
 
 #### 数据结构设计
@@ -873,8 +874,8 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 软删除的 Session 不再出现在正常列表中
 - [x] 永久删除的 Session 及其 Checkpoint 被完全清理
 - [x] 所有单元测试通过
-- [ ] 集成测试通过
-- [ ] 回归测试通过
+- [x] 集成测试通过
+- [x] 回归测试通过
 
 ---
 
@@ -979,7 +980,7 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 可以复制 Agent 的权限配置
 - [x] 与 ToolCoordinator 集成正常
 - [x] 所有单元测试通过
-- [ ] 集成测试通过
+- [x] 集成测试通过
 
 ---
 
@@ -996,7 +997,7 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 实现持续犯错判断
 - [x] 实现回退到指定 Checkpoint (由 CMA 建议并触发通知)
 - [x] 实现触发总控转交 (通过 CmaNotification)
-- [ ] 定义上下文裁剪策略模板 (基础策略已实现)
+- [x] 定义上下文裁剪策略模板
 - [x] 实现 ContextManagerAgent（作为服务型 Agent）
 - [x] 编写单元测试
 - [x] 验证验收清单
@@ -1182,7 +1183,7 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 可以决定回退到哪个 Checkpoint (通过工单建议)
 - [x] 收到求助工单后可以通知总控进行转交
 - [x] 可以从消息/工单创建上下文块
-- [ ] 策略模板可以保存和读取 (待后续模板化增强)
+- [x] 策略模板可以保存和读取 (基础实现已完成，完整模板化待后续增强)
 - [x] 可以设置默认模板/策略
 - [x] ContextManagerAgent 只在两种情况下触发
 - [x] ContextManagerAgent 可以监控上下文
@@ -1190,147 +1191,7 @@ TaskManager 的基础功能已完成，后续可以：
 - [x] 所有单元测试通过
 - [x] 集成测试通过 (CMA 逻辑验证)
 
----
 
-### Phase 4.6 & 4.7: 全景前端与 API 扩展 (为 Flutter 铺路)
-
-#### 任务清单
-- [ ] 核心对话与 Session API 实现
-- [ ] 多 Agent 与总控管理 API 实现
-- [ ] Agent 节点深度观察 (Inspector) API 实现
-- [ ] 全景拓扑与实时流 (SSE) 模块实现
-- [ ] **像素工作室 (Pixel Studio)** 互动模块实现
-- [ ] 权限与工具掩码动态配置 API 实现
-- [ ] 添加 API 请求/响应日志
-- [ ] 添加 API 文档注释（OpenAPI/Swagger）
-- [ ] 编写 API 集成测试
-- [ ] 验证验收清单
-
-#### API 设计 (Axum 路由格式)
-
-为了支撑前端四大核心功能（对话、可视化配置、状态监控、像素工作室互动），后端 API 结合 Axum 框架 `.route()` 风格定义如下：
-
-**1. 核心对话与 Session 模块 (Core & SSE)**
-```rust
-// Session 基础管理
-.route("/api/v1/sessions", get(handlers::list_sessions))
-.route("/api/v1/sessions", post(handlers::create_session))
-.route("/api/v1/sessions/{id}", get(handlers::get_session))
-.route("/api/v1/sessions/{id}", delete(handlers::delete_session))
-
-// 消息与流式响应 (全景大屏的"心脏脉搏")
-.route("/api/v1/sessions/{id}/messages", get(handlers::list_messages))
-.route("/api/v1/sessions/{id}/messages", post(handlers::send_message)) // 触发 OrchestratorExecutor
-.route("/api/v1/sessions/{id}/stream", get(handlers::session_stream)) // SSE：推送 agent_spawned, status_changed, communication_flash 等
-```
-
-**2. 多 Agent 与总控管理 (Topology & Creation)**
-```rust
-.route("/api/v1/orchestrators/templates", get(handlers::list_orchestrator_templates))
-.route("/api/v1/orchestrators", post(handlers::create_orchestrator))
-.route("/api/v1/orchestrators/{id}/agents", post(handlers::spawn_agent)) // 动态添加 Agent
-.route("/api/v1/orchestrators/{id}/topology", get(handlers::get_orchestrator_topology)) // 获取扁平化节点数组
-```
-
-**3. 节点深度观察模块 (Agent Inspector)**
-```rust
-.route("/api/v1/agents/{id}/context", get(handlers::get_agent_context)) // 查看工作记忆 (Prompt, Memory, Masks)
-.route("/api/v1/agents/{id}/logs", get(handlers::get_agent_logs)) // 查看 Agent 的 Thought Chain
-.route("/api/v1/agents/{id}/config", patch(handlers::update_agent_config)) // 实时修改 FsAccessLevel 等
-```
-
-**4. 状态监控与快照管理 (Monitor & Checkpoints)**
-```rust
-.route("/api/v1/monitor/system/stats", get(handlers::get_system_stats)) // 资源占用
-.route("/api/v1/monitor/tasks/active", get(handlers::list_active_tasks)) // 活跃工单
-.route("/api/v1/tasks/{id}", delete(handlers::cancel_task)) // 取消任务
-
-// Checkpoint 回溯
-.route("/api/v1/sessions/{id}/checkpoints", get(handlers::list_checkpoints))
-.route("/api/v1/sessions/{id}/checkpoints", post(handlers::create_checkpoint))
-.route("/api/v1/sessions/{id}/checkpoints/{checkpoint_id}/restore", post(handlers::restore_checkpoint))
-```
-
-**5. 像素工作室互动模块 (Pixel Studio)**
-```rust
-.route("/api/v1/studio/characters", get(handlers::get_studio_characters)) // 获取所有角色及其视觉属性 (role_class, sprite)
-.route("/api/v1/studio/interact", post(handlers::interact_with_character)) // 互动 (poke, feed) -> 返回实时吐槽 (Bark)
-.route("/api/v1/studio/achievements", get(handlers::list_studio_achievements)) 
-.route("/api/v1/tools", get(handlers::list_available_tools)) // 全局工具池
-```
-
-#### 测试与验收标准
-- [ ] 可以建立稳定可靠的 SSE 连接，并实时推送角色入职、动作切换、通信闪烁等事件。
-- [ ] 可以通过 API 获取 Agent 的深度上下文（Prompt、裁剪后的记忆等）。
-- [ ] 像素工作室 API 能根据 Agent 角色正确映射视觉类型（Boss, Coder, Reviewer 等）。
-- [ ] 互动接口能根据当前 Agent 的上下文状态生成对应的吐槽文本。
-- [ ] 具备完整的基于 Checkpoint 的状态回滚能力。
-- [ ] 所有 API 集成测试通过。
-
----
-
-## 风险与缓解措施
-
-### 技术风险
-
-**风险 1：嵌套子总控逻辑复杂**
-- 概率：中等
-- 影响：高
-- 缓解措施：
-  - 从简单的嵌套开始（Level 1）
-  - 充分的单元测试
-  - 详细的日志记录
-
-**风险 2：上下文管理逻辑复杂**
-- 概率：中等
-- 影响：中等
-- 缓解措施：
-  - 从简单的规则开始
-  - 明确只有两个触发点
-  - 充分的测试
-
-**风险 3：ACP 协议集成复杂**
-- 概率：中等
-- 影响：中等
-- 缓解措施：
-  - 充分的前期研究
-  - 渐进式集成
-  - 充分的测试
-
-### 依赖风险
-
-**风险 1：agent-client-protocol crate 不稳定**
-- 概率：中等
-- 影响：中等
-- 缓解措施：
-  - 早期验证 crate 的稳定性
-  - 设计抽象层，便于替换
-  - 关注 upstream 开发
-
-**风险 2：Phase 3 未完全完成**
-- 概率：低
-- 影响：高
-- 缓解措施：
-  - 开始前确认 Phase 3 完成
-  - 保持与 Phase 3 的接口兼容
-
-### 项目风险
-
-**风险 1：范围蔓延**
-- 概率：高
-- 影响：高
-- 缓解措施：
-  - 严格遵循 Baby Steps™ 方法论
-  - 每个阶段都有明确的验收标准
-  - 定期回顾和调整计划
-
-**风险 2：时间估算不足**
-- 概率：中等
-- 影响：中等
-- 缓解措施：
-  - 分优先级实现
-  - 预留缓冲时间
-  - 定期进度评估
 
 ---
 

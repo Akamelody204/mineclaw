@@ -2,31 +2,59 @@
 //!
 //! 提供 Agent 的定义、创建、执行任务和发送工单等功能。
 
-// 占位模块声明，后续会实现
 pub mod builder;
 pub mod context;
 pub mod context_manager;
 pub mod types;
 pub mod work_order;
 
-// 占位 use 声明，后续会实现
 pub use builder::*;
 pub use context::*;
 pub use context_manager::*;
 pub use types::*;
 pub use work_order::*;
 
+use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::llm::{ChatMessage, LlmProviderRegistry};
 use crate::tools::orchestration::OrchestrationInterface;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Agent 执行器
 ///
 /// 负责创建 Agent、执行任务和发送工单
-pub struct AgentExecutor;
+pub struct AgentExecutor {
+    /// LLM 提供者注册表
+    pub provider_registry: Arc<LlmProviderRegistry>,
+    /// MCP 服务器管理器
+    pub mcp_server_manager: Arc<tokio::sync::Mutex<crate::mcp::McpServerManager>>,
+    /// 工具执行器
+    pub tool_executor: crate::mcp::ToolExecutor,
+    /// 本地工具注册表
+    pub local_tool_registry: Arc<crate::tools::LocalToolRegistry>,
+    /// 应用配置
+    pub config: Arc<Config>,
+}
 
 impl AgentExecutor {
+    /// 创建新的 AgentExecutor
+    pub fn new(
+        provider_registry: Arc<LlmProviderRegistry>,
+        mcp_server_manager: Arc<tokio::sync::Mutex<crate::mcp::McpServerManager>>,
+        tool_executor: crate::mcp::ToolExecutor,
+        local_tool_registry: Arc<crate::tools::LocalToolRegistry>,
+        config: Arc<Config>,
+    ) -> Self {
+        Self {
+            provider_registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
+        }
+    }
+
     /// 创建一个新的 Agent
     ///
     /// # 参数
@@ -34,7 +62,7 @@ impl AgentExecutor {
     ///
     /// # 返回
     /// 返回创建的 Agent 或错误
-    pub fn create_agent(config: AgentConfig) -> Result<Agent> {
+    pub fn create_agent(&self, config: AgentConfig) -> Result<Agent> {
         debug!(name = %config.name, role = ?config.role, "Creating new agent");
 
         // 验证配置
@@ -57,6 +85,7 @@ impl AgentExecutor {
     /// # 返回
     /// 返回任务执行结果或错误
     pub async fn execute_task(
+        &self,
         agent: &mut Agent,
         task: AgentTask,
         _orchestrator: Option<Arc<dyn OrchestrationInterface>>,
@@ -82,33 +111,91 @@ impl AgentExecutor {
         // 更新 Agent 状态为 Busy
         agent.set_state(AgentState::Busy);
 
-        // 这里是实际执行任务的逻辑
-        // 目前是占位实现，后续会集成 LLM 和工具调用
         let start_time = std::time::Instant::now();
-
-        let result = AgentTaskResult {
-            success: true,
+        let mut result = AgentTaskResult {
+            success: false,
             agent_id: agent.id,
             session_id: task.session_id,
-            response: format!(
-                "Task executed successfully (placeholder). Message: {}",
-                task.user_message
-            ),
+            response: String::new(),
             tool_calls: Vec::new(),
             error: None,
-            execution_time_ms: start_time.elapsed().as_millis() as u64,
+            execution_time_ms: 0,
             new_checkpoint_id: None,
         };
 
+        // 使用 finally 模式确保状态回退
+        let execution_result: Result<()> = async {
+            // 获取 LLM 提供者
+            let model_profile = &agent.llm_config.model_profile;
+            let provider = self.provider_registry.get_provider(model_profile)?;
+
+            // 获取可用工具（简化版：暂时不传递工具，只做简单的LLM调用）
+            // 注意：完整的工具调用循环需要更复杂的消息历史管理
+            let tools = Vec::new();
+
+            // 构建消息列表
+            let messages = vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: Some(agent.system_prompt.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(task.user_message.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ];
+
+            // 调用 LLM
+            info!(
+                agent_id = %agent.id,
+                model_profile = %model_profile,
+                message_count = %messages.len(),
+                "Calling LLM"
+            );
+
+            let llm_response = provider.chat_with_tools(messages, tools).await?;
+
+            // 处理响应
+            result.success = true;
+            result.response = llm_response.text.unwrap_or_default();
+
+            // 注意：工具调用功能暂未完全实现，需要更复杂的消息历史管理
+            // 目前 tool_calls 保持为空
+
+            Ok(())
+        }
+        .await;
+
+        // 处理执行结果
+        match execution_result {
+            Ok(_) => {
+                info!(
+                    agent_id = %agent.id,
+                    success = %result.success,
+
+                    "Task execution completed"
+                );
+            }
+            Err(e) => {
+                error!(
+                    agent_id = %agent.id,
+                    error = %e,
+                    "Task execution failed"
+                );
+                result.success = false;
+                result.error = Some(e.to_string());
+            }
+        }
+
+        // 更新执行时间
+        result.execution_time_ms = start_time.elapsed().as_millis() as u64;
+
         // 更新 Agent 状态回 Idle
         agent.set_state(AgentState::Idle);
-
-        info!(
-            agent_id = %agent.id,
-            success = %result.success,
-            execution_time_ms = %result.execution_time_ms,
-            "Task execution completed"
-        );
 
         Ok(result)
     }
@@ -150,23 +237,50 @@ impl AgentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::{McpServerManager, ToolExecutor};
+    use crate::tools::LocalToolRegistry;
+    use tokio::sync::Mutex;
 
     #[test]
     fn test_agent_executor_creation() {
-        let _executor = AgentExecutor;
+        let config = Arc::new(Config::default());
+        let registry = Arc::new(LlmProviderRegistry::from_config(&config).unwrap());
+        let mcp_server_manager = Arc::new(Mutex::new(McpServerManager::new()));
+        let tool_executor = ToolExecutor::new();
+        let local_tool_registry = Arc::new(LocalToolRegistry::new());
+        let _executor = AgentExecutor::new(
+            registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
+        );
         // 简单测试，确保可以创建
     }
 
     #[test]
     fn test_create_agent_success() {
-        let config = AgentConfig::new(
+        let config = Arc::new(Config::default());
+        let registry = Arc::new(LlmProviderRegistry::from_config(&config).unwrap());
+        let mcp_server_manager = Arc::new(Mutex::new(McpServerManager::new()));
+        let tool_executor = ToolExecutor::new();
+        let local_tool_registry = Arc::new(LocalToolRegistry::new());
+        let executor = AgentExecutor::new(
+            registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
+        );
+
+        let agent_config = AgentConfig::new(
             "Test Agent".to_string(),
             AgentRole::Worker,
-            LlmConfig::new("gpt-4".to_string()),
+            LlmConfig::new("default".to_string()),
             "You are a helpful assistant.".to_string(),
         );
 
-        let agent = AgentExecutor::create_agent(config).unwrap();
+        let agent = executor.create_agent(agent_config).unwrap();
         assert_eq!(agent.name, "Test Agent");
         assert_eq!(agent.role, AgentRole::Worker);
         assert_eq!(agent.state, AgentState::Idle);
@@ -174,14 +288,27 @@ mod tests {
 
     #[test]
     fn test_create_agent_invalid_config() {
-        let config = AgentConfig::new(
+        let config = Arc::new(Config::default());
+        let registry = Arc::new(LlmProviderRegistry::from_config(&config).unwrap());
+        let mcp_server_manager = Arc::new(Mutex::new(McpServerManager::new()));
+        let tool_executor = ToolExecutor::new();
+        let local_tool_registry = Arc::new(LocalToolRegistry::new());
+        let executor = AgentExecutor::new(
+            registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
+        );
+
+        let agent_config = AgentConfig::new(
             "".to_string(), // 空名称，应该失败
             AgentRole::Worker,
-            LlmConfig::new("gpt-4".to_string()),
+            LlmConfig::new("default".to_string()),
             "You are a helpful assistant.".to_string(),
         );
 
-        let result = AgentExecutor::create_agent(config);
+        let result = executor.create_agent(agent_config);
         assert!(result.is_err());
     }
 }

@@ -107,6 +107,9 @@ pub enum Error {
     #[error("Tool mask not found: {0}")]
     ToolMaskNotFound(String),
 
+    #[error("Model profile not found: {0}")]
+    ModelProfileNotFound(String),
+
     #[error("Internal server error")]
     Internal,
 }
@@ -148,6 +151,7 @@ impl Error {
             Error::AgentExecution(_) => "AGENT_EXECUTION_ERROR",
             Error::WorkOrder(_) => "WORK_ORDER_ERROR",
             Error::ToolMaskNotFound(_) => "TOOL_MASK_NOT_FOUND",
+            Error::ModelProfileNotFound(_) => "MODEL_PROFILE_NOT_FOUND",
             Error::Internal => "INTERNAL_SERVER_ERROR",
         }
     }
@@ -219,6 +223,7 @@ impl axum::response::IntoResponse for Error {
             Error::AgentExecution(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Error::WorkOrder(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::ToolMaskNotFound(_) => axum::http::StatusCode::NOT_FOUND,
+            Error::ModelProfileNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         };
 

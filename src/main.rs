@@ -16,7 +16,7 @@ use mineclaw::tools::{
     terminal::TerminalTool,
 };
 use mineclaw::{
-    AppState, Config, SessionRepository, ToolCoordinator, create_provider, create_router,
+    AppState, Config, LlmProviderRegistry, SessionRepository, ToolCoordinator, create_router,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -35,6 +35,10 @@ async fn main() -> mineclaw::Result<()> {
 
     let config = Config::load()?;
     info!("Configuration loaded successfully");
+
+    // 先保存服务器地址信息
+    let server_host = config.server.host.clone();
+    let server_port = config.server.port;
 
     // 初始化 AgentFS
     info!("Initializing AgentFS...");
@@ -59,15 +63,10 @@ async fn main() -> mineclaw::Result<()> {
     info!("CheckpointManager initialized successfully");
 
     let session_repo = SessionRepository::new();
-    let llm_provider = create_provider(config.llm.clone());
+    let provider_registry = Arc::new(LlmProviderRegistry::from_config(&config)?);
 
-    // 初始化 Phase 4 组件
-    info!("Initializing TaskManager and ContextManagerAgent...");
-    let task_manager = Arc::new(tokio::sync::Mutex::new(TaskManager::new()));
-    let context_store = ContextStore::new();
-    // 默认最大上下文设置为 100,000 tokens
-    let context_manager = Arc::new(ContextManagerAgent::new(context_store, 100000));
-    let orchestrator_executor = Arc::new(OrchestratorExecutor);
+    // 包装为 Arc，后面需要用到
+    let config_arc = std::sync::Arc::new(config.clone());
 
     // 初始化 MCP 服务器管理器
     let mut mcp_server_manager = McpServerManager::new();
@@ -96,10 +95,6 @@ async fn main() -> mineclaw::Result<()> {
 
     let tool_executor = ToolExecutor::new();
 
-    // 先保存服务器地址信息
-    let server_host = config.server.host.clone();
-    let server_port = config.server.port;
-
     // 初始化本地工具注册表
     let mut local_tool_registry = LocalToolRegistry::new();
     FilesystemTool::register_all(&mut local_tool_registry);
@@ -116,14 +111,27 @@ async fn main() -> mineclaw::Result<()> {
 
     // 包装为 Arc
     let local_tool_registry_arc = std::sync::Arc::new(local_tool_registry);
-    let config_arc = std::sync::Arc::new(config);
 
     // 创建 Arc<Mutex<McpServerManager>> 用于共享
     let mcp_server_manager_arc = std::sync::Arc::new(tokio::sync::Mutex::new(mcp_server_manager));
 
+    // 初始化 Phase 4 组件
+    info!("Initializing TaskManager and ContextManagerAgent...");
+    let task_manager = Arc::new(tokio::sync::Mutex::new(TaskManager::new()));
+    let context_store = ContextStore::new();
+    // 默认最大上下文设置为 100,000 tokens
+    let context_manager = Arc::new(ContextManagerAgent::new(context_store, 100000));
+    let orchestrator_executor = Arc::new(OrchestratorExecutor::new(
+        provider_registry.clone(),
+        mcp_server_manager_arc.clone(),
+        tool_executor.clone(),
+        local_tool_registry_arc.clone(),
+        config_arc.clone(),
+    ));
+
     // 创建 ToolCoordinator
     let tool_coordinator = ToolCoordinator::new(
-        llm_provider.clone(),
+        provider_registry.default_provider(),
         mcp_server_manager_arc.clone(),
         tool_executor.clone(),
         local_tool_registry_arc.clone(),
@@ -133,7 +141,7 @@ async fn main() -> mineclaw::Result<()> {
 
     let app_state = AppState::new(
         session_repo,
-        llm_provider,
+        provider_registry,
         mcp_server_manager_arc,
         tool_executor,
         tool_coordinator,

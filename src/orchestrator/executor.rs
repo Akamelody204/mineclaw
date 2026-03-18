@@ -11,6 +11,8 @@ use crate::agent::{
     Agent, AgentConfig, AgentExecutor, AgentId, AgentRole, AgentState, AgentTask, AgentTaskResult,
 };
 use crate::error::{Error, Result};
+use crate::mcp::{McpServerManager, ToolExecutor};
+use crate::tools::LocalToolRegistry;
 
 use super::task_manager::{SharedTaskManager, TaskStatus as TaskManagerTaskStatus};
 use super::types::{
@@ -18,16 +20,49 @@ use super::types::{
     TaskStatus,
 };
 
+use super::prompt_template::PromptAssembler;
+use crate::config::Config;
+use crate::llm::LlmProviderRegistry;
 use crate::tools::orchestration::OrchestrationInterface;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// 总控执行器
 ///
 /// 负责创建总控、管理 Agent、分配任务和处理工单等功能。
-pub struct OrchestratorExecutor;
+pub struct OrchestratorExecutor {
+    /// LLM 提供者注册表
+    pub provider_registry: Arc<LlmProviderRegistry>,
+    /// MCP 服务器管理器
+    pub mcp_server_manager: Arc<Mutex<McpServerManager>>,
+    /// 工具执行器
+    pub tool_executor: ToolExecutor,
+    /// 本地工具注册表
+    pub local_tool_registry: Arc<LocalToolRegistry>,
+    /// 应用配置
+    pub config: Arc<Config>,
+}
+
+impl OrchestratorExecutor {
+    /// 创建新的 OrchestratorExecutor
+    pub fn new(
+        provider_registry: Arc<LlmProviderRegistry>,
+        mcp_server_manager: Arc<Mutex<McpServerManager>>,
+        tool_executor: ToolExecutor,
+        local_tool_registry: Arc<LocalToolRegistry>,
+        config: Arc<Config>,
+    ) -> Self {
+        Self {
+            provider_registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
+        }
+    }
+}
 
 impl OrchestratorExecutor {
     /// 创建新的总控
@@ -37,7 +72,7 @@ impl OrchestratorExecutor {
     ///
     /// # 返回
     /// 返回创建的总控或错误
-    pub fn create_orchestrator(config: OrchestratorConfig) -> Result<Orchestrator> {
+    pub fn create_orchestrator(&self, mut config: OrchestratorConfig) -> Result<Orchestrator> {
         debug!(
             name = %config.name,
             role = ?config.role,
@@ -48,8 +83,23 @@ impl OrchestratorExecutor {
         // 验证配置
         config.validate()?;
 
+        // 使用 PromptAssembler 增强系统提示词，注入可用的模型信息
+        config.agent_config.system_prompt = PromptAssembler::build_orchestrator_prompt(
+            &config.agent_config.system_prompt,
+            &self.provider_registry,
+        );
+
+        // 创建 AgentExecutor 实例
+        let agent_executor = AgentExecutor::new(
+            self.provider_registry.clone(),
+            self.mcp_server_manager.clone(),
+            self.tool_executor.clone(),
+            self.local_tool_registry.clone(),
+            self.config.clone(),
+        );
+
         // 创建总控自身的 Agent
-        let agent = AgentExecutor::create_agent(config.agent_config.clone())?;
+        let agent = agent_executor.create_agent(config.agent_config.clone())?;
 
         // 创建总控
         let orchestrator = Orchestrator::new(config, agent);
@@ -73,6 +123,7 @@ impl OrchestratorExecutor {
     /// # 返回
     /// 返回更新后的总控和新创建的 Agent，或错误
     pub fn create_agent(
+        &self,
         mut orchestrator: Orchestrator,
         mut agent_config: AgentConfig,
     ) -> Result<(Orchestrator, Agent)> {
@@ -93,8 +144,17 @@ impl OrchestratorExecutor {
                 .with_parent_orchestrator(AgentId::from_uuid(*orchestrator.id.as_uuid()));
         }
 
+        // 创建 AgentExecutor 实例
+        let agent_executor = AgentExecutor::new(
+            self.provider_registry.clone(),
+            self.mcp_server_manager.clone(),
+            self.tool_executor.clone(),
+            self.local_tool_registry.clone(),
+            self.config.clone(),
+        );
+
         // 创建 Agent
-        let agent = AgentExecutor::create_agent(agent_config)?;
+        let agent = agent_executor.create_agent(agent_config)?;
 
         // 添加到总控的管理列表
         orchestrator.add_agent(agent.clone());
@@ -184,6 +244,7 @@ impl OrchestratorExecutor {
     /// # 返回
     /// 返回任务执行结果或错误
     pub async fn assign_task_serial(
+        &self,
         orchestrator: &mut Orchestrator,
         agent_id: &AgentId,
         task: AgentTask,
@@ -200,8 +261,17 @@ impl OrchestratorExecutor {
             .get_agent_mut(agent_id)
             .ok_or_else(|| Error::AgentNotFound(agent_id.to_string()))?;
 
+        // 创建 AgentExecutor 实例
+        let agent_executor = AgentExecutor::new(
+            self.provider_registry.clone(),
+            self.mcp_server_manager.clone(),
+            self.tool_executor.clone(),
+            self.local_tool_registry.clone(),
+            self.config.clone(),
+        );
+
         // 执行任务
-        let result = AgentExecutor::execute_task(agent, task, provider).await?;
+        let result = agent_executor.execute_task(agent, task, provider).await?;
 
         info!(
             orchestrator_id = %orchestrator.id,
@@ -452,12 +522,36 @@ impl OrchestratorExecutor {
 /// 总控接口实现
 ///
 /// 为本地工具提供访问总控能力的能力，同时保持模块解耦。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OrchestratorProvider {
     /// 共享的总控状态
     pub orchestrator: Arc<RwLock<Orchestrator>>,
     /// 共享的任务管理器
     pub task_manager: Option<SharedTaskManager>,
+    /// LLM 提供者注册表
+    pub provider_registry: Arc<LlmProviderRegistry>,
+    /// MCP 服务器管理器
+    pub mcp_server_manager: Arc<Mutex<McpServerManager>>,
+    /// 工具执行器
+    pub tool_executor: ToolExecutor,
+    /// 本地工具注册表
+    pub local_tool_registry: Arc<LocalToolRegistry>,
+    /// 应用配置
+    pub config: Arc<Config>,
+}
+
+impl std::fmt::Debug for OrchestratorProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrchestratorProvider")
+            .field("orchestrator", &"Arc<RwLock<Orchestrator>>")
+            .field("task_manager", &self.task_manager)
+            .field("provider_registry", &"Arc<LlmProviderRegistry>")
+            .field("mcp_server_manager", &"Arc<Mutex<McpServerManager>>")
+            .field("tool_executor", &"ToolExecutor")
+            .field("local_tool_registry", &"Arc<LocalToolRegistry>")
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl OrchestratorProvider {
@@ -465,10 +559,20 @@ impl OrchestratorProvider {
     pub fn new(
         orchestrator: Arc<RwLock<Orchestrator>>,
         task_manager: Option<SharedTaskManager>,
+        provider_registry: Arc<LlmProviderRegistry>,
+        mcp_server_manager: Arc<Mutex<McpServerManager>>,
+        tool_executor: ToolExecutor,
+        local_tool_registry: Arc<LocalToolRegistry>,
+        config: Arc<Config>,
     ) -> Self {
         Self {
             orchestrator,
             task_manager,
+            provider_registry,
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            config,
         }
     }
 }
@@ -524,18 +628,40 @@ impl OrchestrationInterface for OrchestratorProvider {
         }))
     }
 
-    async fn spawn_sub_agent(&self, name: &str, role: &str, capability: &str) -> Result<String> {
+    async fn spawn_sub_agent(
+        &self,
+        name: &str,
+        role: &str,
+        capability: &str,
+        model_profile: Option<&str>,
+    ) -> Result<String> {
         let mut orch = self.orchestrator.write().await;
 
         // 解析角色
         use std::str::FromStr;
         let agent_role = crate::agent::AgentRole::from_str(role)?;
 
-        // 构造配置，继承父节点的部分环境
+        // 确定使用的 LLM 配置
+        let llm_config = if let Some(model_name) = model_profile {
+            // 尝试从注册表解析指定的模型档案
+            if let Some(profile) = self.provider_registry.get_model_profile(model_name) {
+                crate::agent::LlmConfig::from_profile(profile)
+            } else {
+                // 如果模型档案不存在，返回错误
+                return Err(crate::error::Error::ModelProfileNotFound(
+                    model_name.to_string(),
+                ));
+            }
+        } else {
+            // 如果没有指定，继承父节点的配置
+            orch.agent.llm_config.clone()
+        };
+
+        // 构造配置
         let agent_config = AgentConfig::new(
             name.to_string(),
             agent_role,
-            orch.agent.llm_config.clone(),
+            llm_config,
             format!("You are a specialized agent. Capability: {}", capability),
         )
         .with_capability(capability.to_string());
@@ -543,7 +669,23 @@ impl OrchestrationInterface for OrchestratorProvider {
         // 执行创建逻辑
         // 因为 OrchestratorExecutor::create_agent 消费 Orchestrator，
         // 我们利用 Orchestrator 是 Clone 的特性进行原地更新。
-        let (new_orch, agent) = OrchestratorExecutor::create_agent(orch.clone(), agent_config)?;
+        // 创建 AgentExecutor 实例
+        let agent_executor = AgentExecutor::new(
+            self.provider_registry.clone(),
+            self.mcp_server_manager.clone(),
+            self.tool_executor.clone(),
+            self.local_tool_registry.clone(),
+            self.config.clone(),
+        );
+
+        // 创建 Agent
+        let agent = agent_executor.create_agent(agent_config)?;
+
+        // 添加到总控的管理列表
+        orch.add_agent(agent.clone());
+
+        // 因为我们直接修改了 orch，不需要 new_orch
+        let new_orch = orch.clone();
         *orch = new_orch;
 
         Ok(agent.id.to_string())
@@ -593,13 +735,18 @@ impl OrchestrationInterface for OrchestratorProvider {
                 "status": "Running"
             }))
         } else {
-            let result = OrchestratorExecutor::assign_task_serial(
-                &mut orch,
-                &agent_id,
-                task,
-                Some(Arc::new(self.clone())),
-            )
-            .await?;
+            // 创建 OrchestratorExecutor 实例
+            let orch_executor = OrchestratorExecutor::new(
+                self.provider_registry.clone(),
+                self.mcp_server_manager.clone(),
+                self.tool_executor.clone(),
+                self.local_tool_registry.clone(),
+                self.config.clone(),
+            );
+
+            let result = orch_executor
+                .assign_task_serial(&mut orch, &agent_id, task, Some(Arc::new(self.clone())))
+                .await?;
             Ok(serde_json::to_value(result)?)
         }
     }
@@ -610,11 +757,37 @@ mod tests {
     use super::*;
     use crate::agent::work_order::WorkOrderRecipient;
     use crate::agent::{AgentConfig, AgentRole, LlmConfig};
+    use crate::config::Config;
+    use crate::llm::LlmProviderRegistry;
+    use std::sync::Arc;
 
     use crate::orchestrator::OrchestratorId;
 
+    // 辅助函数：创建测试用的 OrchestratorExecutor
+    fn create_test_executor() -> OrchestratorExecutor {
+        let mut config = Config::default();
+        config.llm.model = "gpt-4-test".to_string();
+        config.llm.api_key = "test-key".to_string();
+        config.llm.provider = "openai".to_string();
+
+        let registry = LlmProviderRegistry::from_config(&config).unwrap();
+        let mcp_server_manager =
+            Arc::new(tokio::sync::Mutex::new(crate::mcp::McpServerManager::new()));
+        let tool_executor = crate::mcp::ToolExecutor::new();
+        let local_tool_registry = Arc::new(crate::tools::LocalToolRegistry::new());
+
+        OrchestratorExecutor::new(
+            Arc::new(registry),
+            mcp_server_manager,
+            tool_executor,
+            local_tool_registry,
+            Arc::new(config),
+        )
+    }
+
     #[test]
     fn test_create_orchestrator_master() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -623,17 +796,21 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         assert_eq!(orchestrator.name, "Test Master");
         assert!(orchestrator.is_master());
         assert_eq!(orchestrator.nested_depth, 0);
         assert!(orchestrator.parent_orchestrator_id.is_none());
         assert!(orchestrator.managed_agents.is_empty());
+
+        // 验证系统提示词被增强了
+        assert!(orchestrator.agent.system_prompt.contains("可用模型信息"));
     }
 
     #[test]
     fn test_create_orchestrator_sub() {
+        let executor = create_test_executor();
         let parent_id = OrchestratorId::new();
         let agent_config = AgentConfig::new(
             "Sub Agent".to_string(),
@@ -646,7 +823,7 @@ mod tests {
 
         let config =
             OrchestratorConfig::new_sub("Test Sub".to_string(), agent_config, 1, parent_id);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         assert_eq!(orchestrator.name, "Test Sub");
         assert!(orchestrator.is_sub());
@@ -656,6 +833,7 @@ mod tests {
 
     #[test]
     fn test_create_orchestrator_invalid_config() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -666,12 +844,13 @@ mod tests {
         let mut config = OrchestratorConfig::new_master("Test".to_string(), agent_config);
         config.name = "".to_string(); // 空名称，应该失败
 
-        let result = OrchestratorExecutor::create_orchestrator(config);
+        let result = executor.create_orchestrator(config);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_create_agent_via_orchestrator() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -680,7 +859,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let worker_config = AgentConfig::new(
             "Worker Agent".to_string(),
@@ -689,8 +868,7 @@ mod tests {
             "You are a helpful worker.".to_string(),
         );
 
-        let (orchestrator, agent) =
-            OrchestratorExecutor::create_agent(orchestrator, worker_config).unwrap();
+        let (orchestrator, agent) = executor.create_agent(orchestrator, worker_config).unwrap();
 
         assert_eq!(agent.name, "Worker Agent");
         assert_eq!(agent.role, AgentRole::Worker);
@@ -700,6 +878,7 @@ mod tests {
 
     #[test]
     fn test_create_sub_orchestrator_via_orchestrator() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -708,7 +887,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let sub_config = AgentConfig::new(
             "Sub Agent".to_string(),
@@ -717,8 +896,7 @@ mod tests {
             "You are a sub orchestrator.".to_string(),
         );
 
-        let (orchestrator, agent) =
-            OrchestratorExecutor::create_agent(orchestrator, sub_config).unwrap();
+        let (orchestrator, agent) = executor.create_agent(orchestrator, sub_config).unwrap();
 
         assert_eq!(agent.name, "Sub Agent");
         assert_eq!(agent.role, AgentRole::SubOrchestrator);
@@ -728,6 +906,7 @@ mod tests {
 
     #[test]
     fn test_list_agents() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -736,7 +915,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let mut orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let mut orchestrator = executor.create_orchestrator(config).unwrap();
 
         // 创建两个 Agent
         let worker1_config = AgentConfig::new(
@@ -745,7 +924,7 @@ mod tests {
             LlmConfig::new("gpt-4".to_string()),
             "You are worker 1.".to_string(),
         );
-        let (o1, _) = OrchestratorExecutor::create_agent(orchestrator, worker1_config).unwrap();
+        let (o1, _) = executor.create_agent(orchestrator, worker1_config).unwrap();
         orchestrator = o1;
 
         let worker2_config = AgentConfig::new(
@@ -754,7 +933,7 @@ mod tests {
             LlmConfig::new("gpt-4".to_string()),
             "You are worker 2.".to_string(),
         );
-        let (o2, _) = OrchestratorExecutor::create_agent(orchestrator, worker2_config).unwrap();
+        let (o2, _) = executor.create_agent(orchestrator, worker2_config).unwrap();
         orchestrator = o2;
 
         let agents = OrchestratorExecutor::list_agents(&orchestrator);
@@ -763,6 +942,7 @@ mod tests {
 
     #[test]
     fn test_get_agent() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -771,7 +951,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let worker_config = AgentConfig::new(
             "Worker Agent".to_string(),
@@ -780,8 +960,7 @@ mod tests {
             "You are a helpful worker.".to_string(),
         );
 
-        let (orchestrator, agent) =
-            OrchestratorExecutor::create_agent(orchestrator, worker_config).unwrap();
+        let (orchestrator, agent) = executor.create_agent(orchestrator, worker_config).unwrap();
 
         let found = OrchestratorExecutor::get_agent(&orchestrator, &agent.id);
         assert!(found.is_some());
@@ -794,6 +973,7 @@ mod tests {
 
     #[test]
     fn test_remove_agent() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -802,7 +982,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let worker_config = AgentConfig::new(
             "Worker Agent".to_string(),
@@ -811,8 +991,7 @@ mod tests {
             "You are a helpful worker.".to_string(),
         );
 
-        let (orchestrator, agent) =
-            OrchestratorExecutor::create_agent(orchestrator, worker_config).unwrap();
+        let (orchestrator, agent) = executor.create_agent(orchestrator, worker_config).unwrap();
 
         assert_eq!(orchestrator.managed_agents.len(), 1);
 
@@ -822,6 +1001,7 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent_agent() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -830,7 +1010,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let non_existent = AgentId::new();
         let result = OrchestratorExecutor::remove_agent(orchestrator, &non_existent);
@@ -839,6 +1019,7 @@ mod tests {
 
     #[test]
     fn test_generate_work_order() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -847,7 +1028,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let work_order = OrchestratorExecutor::generate_work_order(
             &orchestrator,
@@ -865,6 +1046,7 @@ mod tests {
 
     #[test]
     fn test_associate_session() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -873,7 +1055,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         assert!(orchestrator.session_id.is_none());
 
@@ -885,6 +1067,7 @@ mod tests {
 
     #[test]
     fn test_handle_cma_notification() {
+        let executor = create_test_executor();
         let agent_config = AgentConfig::new(
             "Master Agent".to_string(),
             AgentRole::MasterOrchestrator,
@@ -893,7 +1076,7 @@ mod tests {
         );
 
         let config = OrchestratorConfig::new_master("Test Master".to_string(), agent_config);
-        let orchestrator = OrchestratorExecutor::create_orchestrator(config).unwrap();
+        let orchestrator = executor.create_orchestrator(config).unwrap();
 
         let session_id = Uuid::new_v4();
         let notification = CmaNotification::new(

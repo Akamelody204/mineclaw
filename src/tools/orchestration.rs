@@ -36,7 +36,13 @@ pub trait OrchestrationInterface: Send + Sync + Debug {
     /// 创建子 Agent
     ///
     /// 返回新创建的 agent_id
-    async fn spawn_sub_agent(&self, name: &str, role: &str, capability: &str) -> Result<String>;
+    async fn spawn_sub_agent(
+        &self,
+        name: &str,
+        role: &str,
+        capability: &str,
+        model_profile: Option<&str>,
+    ) -> Result<String>;
 
     /// 指派任务给指定 Agent
     ///
@@ -187,6 +193,10 @@ impl LocalTool for SpawnSubAgentTool {
                 "capability": {
                     "type": "string",
                     "description": "简短的能力描述"
+                },
+                "model_profile": {
+                    "type": "string",
+                    "description": "可选：要使用的模型名称（如 gpt-4o-mini, o1-preview）。如果不指定，将继承父 Agent 的模型。"
                 }
             },
             "required": ["role", "capability"]
@@ -203,8 +213,11 @@ impl LocalTool for SpawnSubAgentTool {
         let name = arguments["name"].as_str().unwrap_or("sub_agent");
         let role = arguments["role"].as_str().unwrap_or_default();
         let capability = arguments["capability"].as_str().unwrap_or_default();
+        let model_profile = arguments["model_profile"].as_str();
 
-        let agent_id = orchestrator.spawn_sub_agent(name, role, capability).await?;
+        let agent_id = orchestrator
+            .spawn_sub_agent(name, role, capability, model_profile)
+            .await?;
         Ok(json!({ "agent_id": agent_id }))
     }
 }

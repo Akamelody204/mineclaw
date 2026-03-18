@@ -142,12 +142,24 @@ pub struct Config {
     pub local_tools: LocalToolsConfig,
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
+    #[serde(default = "default_agentfs_db_path")]
     pub agentfs_db_path: String,
     pub encryption: Option<EncryptionConfig>,
+    /// 命名模型配置档案映射（key 为档案名称，如 "gpt-4o"、"claude-3-opus"）
+    /// 可选：为空时系统行为与之前一致，所有 Agent 使用 Config.llm
+    #[serde(default)]
+    pub models: HashMap<String, ModelProfile>,
+    /// 默认模型档案名称，"default" 特指 Config.llm 段
+    #[serde(default = "default_default_model")]
+    pub default_model: String,
 }
 
 fn default_agentfs_db_path() -> String {
     "data/mineclaw.db".to_string()
+}
+
+fn default_default_model() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -169,6 +181,63 @@ pub struct LlmConfig {
     pub model: String,
     pub max_tokens: u32,
     pub temperature: f64,
+}
+
+/// 模型配置档案
+///
+/// 定义一个命名的 LLM 模型配置，包含连接信息和元数据。
+/// 字段 `api_key`、`base_url`、`max_tokens`、`temperature` 为 Optional，
+/// 未指定时从 `Config.llm`（默认配置）继承。
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModelProfile {
+    /// LLM 提供商（如 "openai"、"anthropic"）
+    pub provider: String,
+    /// API Key（可选，为 None 时从 Config.llm 继承）
+    pub api_key: Option<String>,
+    /// Base URL（可选，为 None 时从 Config.llm 继承）
+    pub base_url: Option<String>,
+    /// 模型名称（如 "gpt-4o"、"claude-3-opus-20240229"）
+    pub model: String,
+    /// 上下文窗口大小（token 数），如 128000
+    pub context_window: Option<u32>,
+    /// 每 1000 input token 的成本（USD）
+    pub cost_per_1k_input: Option<f64>,
+    /// 每 1000 output token 的成本（USD）
+    pub cost_per_1k_output: Option<f64>,
+    /// 能力等级：如 "flagship"、"standard"、"budget"
+    pub capability_tier: Option<String>,
+    /// 最大输出 token 数（可选，为 None 时从 Config.llm 继承）
+    pub max_tokens: Option<u32>,
+    /// 温度参数（可选，为 None 时从 Config.llm 继承）
+    pub temperature: Option<f64>,
+}
+
+/// 完全解析后的模型配置
+///
+/// 所有字段已填充（无 Optional），可直接用于创建 LlmProvider。
+/// 由 `Config::resolve_model_profile()` 生成。
+#[derive(Debug, Clone)]
+pub struct ResolvedModelProfile {
+    /// LLM 提供商
+    pub provider: String,
+    /// API Key（已解析，非空）
+    pub api_key: String,
+    /// Base URL（已解析）
+    pub base_url: String,
+    /// 模型名称
+    pub model: String,
+    /// 最大输出 token 数
+    pub max_tokens: u32,
+    /// 温度参数
+    pub temperature: f64,
+    /// 上下文窗口大小（可能未配置）
+    pub context_window: Option<u32>,
+    /// 每 1000 input token 的成本（可能未配置）
+    pub cost_per_1k_input: Option<f64>,
+    /// 每 1000 output token 的成本（可能未配置）
+    pub cost_per_1k_output: Option<f64>,
+    /// 能力等级（可能未配置）
+    pub capability_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -230,6 +299,8 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             agentfs_db_path: default_agentfs_db_path(),
             encryption: None,
+            models: HashMap::new(),
+            default_model: default_default_model(),
         }
     }
 }
@@ -456,6 +527,68 @@ impl Config {
     fn get_config_path() -> crate::error::Result<PathBuf> {
         Ok(PathBuf::from("config/mineclaw.toml"))
     }
+
+    /// 解析模型档案为完全填充的配置
+    ///
+    /// - `"default"` 或与 `default_model` 相同的名称 → 使用 `Config.llm` 段
+    /// - 其他名称 → 从 `models` 中查找，缺失字段从 `Config.llm` 继承
+    /// - 找不到 → 返回 `Error::ModelProfileNotFound`
+    pub fn resolve_model_profile(
+        &self,
+        profile_name: &str,
+    ) -> crate::error::Result<ResolvedModelProfile> {
+        if profile_name == "default" || profile_name == self.default_model {
+            // 特殊名称 "default" 或与 default_model 相同 → 直接使用 llm 段
+            return Ok(ResolvedModelProfile {
+                provider: self.llm.provider.clone(),
+                api_key: self.llm.api_key.clone(),
+                base_url: self.llm.base_url.clone(),
+                model: self.llm.model.clone(),
+                max_tokens: self.llm.max_tokens,
+                temperature: self.llm.temperature,
+                context_window: None,
+                cost_per_1k_input: None,
+                cost_per_1k_output: None,
+                capability_tier: None,
+            });
+        }
+
+        // 从 models 中查找命名档案
+        let profile = self.models.get(profile_name).ok_or_else(|| {
+            crate::error::Error::ModelProfileNotFound(format!(
+                "Model profile '{}' not found. Available: default{}",
+                profile_name,
+                if self.models.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", {}",
+                        self.models.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                }
+            ))
+        })?;
+
+        // 解析：profile 字段优先，缺失时从 llm 段继承
+        Ok(ResolvedModelProfile {
+            provider: profile.provider.clone(),
+            api_key: profile
+                .api_key
+                .clone()
+                .unwrap_or_else(|| self.llm.api_key.clone()),
+            base_url: profile
+                .base_url
+                .clone()
+                .unwrap_or_else(|| self.llm.base_url.clone()),
+            model: profile.model.clone(),
+            max_tokens: profile.max_tokens.unwrap_or(self.llm.max_tokens),
+            temperature: profile.temperature.unwrap_or(self.llm.temperature),
+            context_window: profile.context_window,
+            cost_per_1k_input: profile.cost_per_1k_input,
+            cost_per_1k_output: profile.cost_per_1k_output,
+            capability_tier: profile.capability_tier.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -570,5 +703,200 @@ command = "echo"
         let server = &mcp.servers[0];
         assert!(server.args.is_empty());
         assert!(server.env.is_empty());
+    }
+
+    #[test]
+    fn test_model_profile_config_deserialization() {
+        let toml_content = r#"
+[server]
+host = "127.0.0.1"
+port = 18789
+
+[llm]
+provider = "openai"
+api_key = "sk-default-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+max_tokens = 2048
+temperature = 0.7
+
+[models.gpt-4o]
+provider = "openai"
+model = "gpt-4o"
+context_window = 128000
+cost_per_1k_input = 0.005
+cost_per_1k_output = 0.015
+capability_tier = "flagship"
+
+[models.claude-3-opus]
+provider = "anthropic"
+model = "claude-3-opus-20240229"
+api_key = "sk-ant-custom"
+base_url = "https://api.anthropic.com"
+context_window = 200000
+cost_per_1k_input = 0.015
+cost_per_1k_output = 0.075
+capability_tier = "flagship"
+max_tokens = 4096
+temperature = 0.5
+
+[models.gpt-4o-mini]
+provider = "openai"
+model = "gpt-4o-mini"
+context_window = 128000
+cost_per_1k_input = 0.00015
+cost_per_1k_output = 0.0006
+capability_tier = "budget"
+"#;
+
+        let config: Config = toml::from_str(toml_content).unwrap();
+
+        // 验证默认字段
+        assert_eq!(config.default_model, "default");
+        assert_eq!(config.models.len(), 3);
+
+        // 验证 gpt-4o profile
+        let gpt4o = &config.models["gpt-4o"];
+        assert_eq!(gpt4o.provider, "openai");
+        assert_eq!(gpt4o.model, "gpt-4o");
+        assert_eq!(gpt4o.context_window, Some(128000));
+        assert_eq!(gpt4o.cost_per_1k_input, Some(0.005));
+        assert_eq!(gpt4o.capability_tier, Some("flagship".to_string()));
+        // 未指定 api_key → None（继承）
+        assert!(gpt4o.api_key.is_none());
+        assert!(gpt4o.base_url.is_none());
+        assert!(gpt4o.max_tokens.is_none());
+
+        // 验证 claude-3-opus profile（有自定义 api_key、base_url、max_tokens、temperature）
+        let claude = &config.models["claude-3-opus"];
+        assert_eq!(claude.provider, "anthropic");
+        assert_eq!(claude.api_key, Some("sk-ant-custom".to_string()));
+        assert_eq!(
+            claude.base_url,
+            Some("https://api.anthropic.com".to_string())
+        );
+        assert_eq!(claude.max_tokens, Some(4096));
+        assert_eq!(claude.temperature, Some(0.5));
+
+        // 验证 budget profile
+        let mini = &config.models["gpt-4o-mini"];
+        assert_eq!(mini.capability_tier, Some("budget".to_string()));
+    }
+
+    #[test]
+    fn test_config_without_models_is_backward_compatible() {
+        let toml_content = r#"
+[server]
+host = "127.0.0.1"
+port = 18789
+
+[llm]
+provider = "openai"
+api_key = "test-key"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+max_tokens = 2048
+temperature = 0.7
+"#;
+
+        let config: Config = toml::from_str(toml_content).unwrap();
+
+        // models 应为空 HashMap
+        assert!(config.models.is_empty());
+        // default_model 应为 "default"
+        assert_eq!(config.default_model, "default");
+    }
+
+    #[test]
+    fn test_resolve_model_profile_default() {
+        let config = Config::default();
+
+        // "default" 应解析为 llm 段
+        let resolved = config.resolve_model_profile("default").unwrap();
+        assert_eq!(resolved.provider, "openai");
+        assert_eq!(resolved.model, "gpt-4o");
+        assert_eq!(resolved.max_tokens, 2048);
+        assert_eq!(resolved.temperature, 0.7);
+        // 元数据应为 None
+        assert!(resolved.context_window.is_none());
+        assert!(resolved.capability_tier.is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_profile_named() {
+        let mut config = Config::default();
+        config.llm.api_key = "sk-shared-key".to_string();
+        config.llm.base_url = "https://api.openai.com/v1".to_string();
+
+        // 添加一个命名的 model profile
+        config.models.insert(
+            "gpt-4o-mini".to_string(),
+            ModelProfile {
+                provider: "openai".to_string(),
+                api_key: None,  // 继承
+                base_url: None, // 继承
+                model: "gpt-4o-mini".to_string(),
+                context_window: Some(128000),
+                cost_per_1k_input: Some(0.00015),
+                cost_per_1k_output: Some(0.0006),
+                capability_tier: Some("budget".to_string()),
+                max_tokens: Some(1024),
+                temperature: Some(0.3),
+            },
+        );
+
+        let resolved = config.resolve_model_profile("gpt-4o-mini").unwrap();
+        assert_eq!(resolved.provider, "openai");
+        assert_eq!(resolved.model, "gpt-4o-mini");
+        // api_key 从 llm 段继承
+        assert_eq!(resolved.api_key, "sk-shared-key");
+        // base_url 从 llm 段继承
+        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
+        // profile 自己的值
+        assert_eq!(resolved.max_tokens, 1024);
+        assert_eq!(resolved.temperature, 0.3);
+        assert_eq!(resolved.context_window, Some(128000));
+        assert_eq!(resolved.capability_tier, Some("budget".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_model_profile_not_found() {
+        let config = Config::default();
+
+        let result = config.resolve_model_profile("nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn test_resolve_model_profile_custom_api_key_override() {
+        let mut config = Config::default();
+        config.llm.api_key = "sk-shared-key".to_string();
+
+        config.models.insert(
+            "claude".to_string(),
+            ModelProfile {
+                provider: "anthropic".to_string(),
+                api_key: Some("sk-ant-exclusive".to_string()), // 覆盖
+                base_url: Some("https://api.anthropic.com".to_string()), // 覆盖
+                model: "claude-3-opus-20240229".to_string(),
+                context_window: None,
+                cost_per_1k_input: None,
+                cost_per_1k_output: None,
+                capability_tier: None,
+                max_tokens: None,  // 继承 llm 段
+                temperature: None, // 继承 llm 段
+            },
+        );
+
+        let resolved = config.resolve_model_profile("claude").unwrap();
+        // api_key 和 base_url 使用 profile 自己的
+        assert_eq!(resolved.api_key, "sk-ant-exclusive");
+        assert_eq!(resolved.base_url, "https://api.anthropic.com");
+        // max_tokens 和 temperature 从 llm 段继承
+        assert_eq!(resolved.max_tokens, 2048);
+        assert_eq!(resolved.temperature, 0.7);
     }
 }

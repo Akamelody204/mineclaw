@@ -3,7 +3,7 @@ use tokio::sync::Mutex;
 
 use crate::checkpoint::CheckpointManager;
 use crate::config::Config;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, LlmProviderRegistry};
 use crate::mcp::{McpServerManager, ToolExecutor};
 use crate::models::SessionRepository;
 use crate::tool_coordinator::ToolCoordinator;
@@ -17,7 +17,7 @@ use crate::orchestrator::task_manager::SharedTaskManager;
 #[derive(Clone)]
 pub struct AppState {
     pub session_repo: SessionRepository,
-    pub llm_provider: Arc<dyn LlmProvider>,
+    pub provider_registry: Arc<LlmProviderRegistry>,
     pub mcp_server_manager: Arc<Mutex<McpServerManager>>,
     pub tool_executor: ToolExecutor,
     pub tool_coordinator: Arc<ToolCoordinator>,
@@ -36,7 +36,7 @@ impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_repo: SessionRepository,
-        llm_provider: Arc<dyn LlmProvider>,
+        provider_registry: Arc<LlmProviderRegistry>,
         mcp_server_manager: Arc<Mutex<McpServerManager>>,
         tool_executor: ToolExecutor,
         tool_coordinator: ToolCoordinator,
@@ -50,7 +50,7 @@ impl AppState {
     ) -> Self {
         Self {
             session_repo,
-            llm_provider,
+            provider_registry,
             mcp_server_manager,
             tool_executor,
             tool_coordinator: Arc::new(tool_coordinator),
@@ -62,5 +62,10 @@ impl AppState {
             task_manager,
             context_manager,
         }
+    }
+
+    /// 获取默认的 LLM 提供者（向后兼容）
+    pub fn default_llm_provider(&self) -> Arc<dyn LlmProvider> {
+        self.provider_registry.default_provider()
     }
 }
