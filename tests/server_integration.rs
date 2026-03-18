@@ -61,16 +61,9 @@ async fn test_terminal_tool_basic_execution() {
     let context = mineclaw::tools::ToolContext::new(session, config_arc.clone());
 
     // 测试简单命令
-    let is_windows = cfg!(windows);
-    let params = if is_windows {
-        json!({
-            "command": "echo hello from integration test"
-        })
-    } else {
-        json!({
-            "command": "echo hello from integration test"
-        })
-    };
+    let params = json!({
+        "command": "echo hello from integration test"
+    });
 
     let result = local_tool_registry
         .call_tool("run_command", params, context)
@@ -147,17 +140,10 @@ async fn test_terminal_tool_output_truncation() {
     let context = mineclaw::tools::ToolContext::new(session, config_arc.clone());
 
     // 测试长输出
-    let is_windows = cfg!(windows);
     let long_text = "a".repeat(200);
-    let params = if is_windows {
-        json!({
-            "command": format!("echo {}", long_text)
-        })
-    } else {
-        json!({
-            "command": format!("echo {}", long_text)
-        })
-    };
+    let params = json!({
+        "command": format!("echo {}", long_text)
+    });
 
     let result = local_tool_registry
         .call_tool("run_command", params, context)

@@ -1,11 +1,11 @@
 //! 工具掩码类型定义
+//!
+//! 提供工具权限管理和过滤功能，支持 MCP 工具精细授权和本地文件工具一键模式。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-
-use crate::agent::AgentId;
 
 // ============================================================================
 // McpToolPermission - MCP 工具权限
@@ -32,21 +32,21 @@ impl fmt::Display for McpToolPermission {
 }
 
 // ============================================================================
-// LocalToolPermission - 本地工具权限
+// FsPermission - 文件系统工具权限
 // ============================================================================
 
-/// 本地工具权限
+/// 本地文件系统工具权限
 ///
-/// 本地工具支持只读/读写两种权限级别。
+/// 支持只读/读写两种权限级别。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LocalToolPermission {
+pub enum FsPermission {
     /// 只读权限
     ReadOnly,
     /// 读写权限
     ReadWrite,
 }
 
-impl fmt::Display for LocalToolPermission {
+impl fmt::Display for FsPermission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadOnly => write!(f, "ReadOnly"),
@@ -56,21 +56,21 @@ impl fmt::Display for LocalToolPermission {
 }
 
 // ============================================================================
-// LocalToolMode - 本地工具全局模式
+// FsAccessLevel - 文件系统访问级别（一键模式）
 // ============================================================================
 
-/// 本地工具全局模式
+/// 本地文件系统访问级别
 ///
-/// 一键切换所有本地工具的权限模式，优先于单个工具配置。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LocalToolMode {
-    /// 所有本地工具只读
+/// 一键切换所有本地文件工具的权限模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FsAccessLevel {
+    /// 所有文件工具只读
     ReadOnly,
-    /// 所有本地工具读写
+    /// 所有文件工具读写
     ReadWrite,
 }
 
-impl fmt::Display for LocalToolMode {
+impl fmt::Display for FsAccessLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadOnly => write!(f, "ReadOnly"),
@@ -83,33 +83,49 @@ impl fmt::Display for LocalToolMode {
 // ToolMask - 工具掩码配置
 // ============================================================================
 
+/// 写入型本地工具列表（方案 A：硬编码筛选）
+const WRITE_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "delete_path",
+    "move_path",
+    "copy_path",
+    "create_directory",
+    "create_checkpoint",
+    "restore_checkpoint",
+];
+
 /// 工具掩码配置
 ///
-/// 为 Agent 配置的工具权限集合。
+/// 决定 Agent 可见和可用的工具子集。直接嵌入在 Agent 结构中。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolMask {
-    /// 目标 Agent ID
-    pub agent_id: AgentId,
     /// MCP 工具权限：{server_name: {tool_name: permission}}
     pub mcp_permissions: HashMap<String, HashMap<String, McpToolPermission>>,
-    /// 本地工具权限：{tool_name: permission}
-    pub local_permissions: HashMap<String, LocalToolPermission>,
-    /// 本地工具全局模式（优先于单个工具配置）
-    pub local_tool_mode: Option<LocalToolMode>,
+    /// 本地工具精细权限配置：{tool_name: permission}
+    pub local_permissions: HashMap<String, FsPermission>,
+    /// 本地文件系统访问级别（一键模式，优先级最高）
+    pub fs_access_level: Option<FsAccessLevel>,
     /// 更新时间
     pub updated_at: DateTime<Utc>,
 }
 
 impl ToolMask {
     /// 创建新的工具掩码配置
-    pub fn new(agent_id: AgentId) -> Self {
+    pub fn new() -> Self {
         Self {
-            agent_id,
             mcp_permissions: HashMap::new(),
             local_permissions: HashMap::new(),
-            local_tool_mode: None,
+            fs_access_level: None,
             updated_at: Utc::now(),
         }
+    }
+
+    /// 创建一个默认只读的掩码
+    pub fn readonly() -> Self {
+        let mut mask = Self::new();
+        mask.fs_access_level = Some(FsAccessLevel::ReadOnly);
+        mask
     }
 
     /// 设置 MCP 工具权限
@@ -121,170 +137,72 @@ impl ToolMask {
     ) {
         self.mcp_permissions
             .entry(server_name)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(tool_name, permission);
         self.updated_at = Utc::now();
     }
 
-    /// 获取 MCP 工具权限
-    pub fn get_mcp_permission(
-        &self,
-        server_name: &str,
-        tool_name: &str,
-    ) -> Option<&McpToolPermission> {
+    /// 检查 MCP 工具是否可见/可用
+    pub fn is_mcp_tool_available(&self, server_name: &str, tool_name: &str) -> bool {
+        // 默认 MCP 工具不可见
         self.mcp_permissions
             .get(server_name)
             .and_then(|tools| tools.get(tool_name))
-    }
-
-    /// 设置本地工具权限
-    pub fn set_local_permission(&mut self, tool_name: String, permission: LocalToolPermission) {
-        self.local_permissions.insert(tool_name, permission);
-        self.updated_at = Utc::now();
-    }
-
-    /// 获取本地工具权限（考虑全局模式）
-    pub fn get_local_permission(&self, tool_name: &str) -> LocalToolPermission {
-        // 全局模式优先
-        if let Some(mode) = &self.local_tool_mode {
-            return match mode {
-                LocalToolMode::ReadOnly => LocalToolPermission::ReadOnly,
-                LocalToolMode::ReadWrite => LocalToolPermission::ReadWrite,
-            };
-        }
-
-        // 否则使用单个工具配置，默认只读
-        self.local_permissions
-            .get(tool_name)
-            .cloned()
-            .unwrap_or(LocalToolPermission::ReadOnly)
-    }
-
-    /// 设置本地工具全局模式
-    pub fn set_local_tool_mode(&mut self, mode: Option<LocalToolMode>) {
-        self.local_tool_mode = mode;
-        self.updated_at = Utc::now();
-    }
-
-    /// 检查 MCP 工具是否可用
-    pub fn is_mcp_tool_available(&self, server_name: &str, tool_name: &str) -> bool {
-        // 默认 MCP 工具不可用
-        self.get_mcp_permission(server_name, tool_name)
             .map(|p| *p == McpToolPermission::Available)
             .unwrap_or(false)
     }
 
-    /// 检查本地工具是否可用（总是可用，只是权限级别不同）
-    pub fn is_local_tool_available(&self, _tool_name: &str) -> bool {
-        // 本地工具总是可用
-        true
+    /// 检查本地工具是否可见/可用
+    pub fn is_local_tool_available(&self, tool_name: &str) -> bool {
+        // 终端工具（Terminal）总是全开放，豁免掩码检查
+        if tool_name.starts_with("terminal_") || tool_name == "execute_command" {
+            return true;
+        }
+
+        // 检查是否是写入型工具
+        let is_write = WRITE_TOOLS.contains(&tool_name);
+
+        // 1. 全局 FsAccessLevel 优先
+        if let Some(level) = self.fs_access_level {
+            return match level {
+                FsAccessLevel::ReadOnly => !is_write, // 只读模式下禁用写入工具
+                FsAccessLevel::ReadWrite => true,     // 读写模式下全部开启
+            };
+        }
+
+        // 2. 检查单个工具配置
+        if let Some(perm) = self.local_permissions.get(tool_name) {
+            return match perm {
+                FsPermission::ReadOnly => !is_write,
+                FsPermission::ReadWrite => true,
+            };
+        }
+
+        // 3. 默认策略：如果是写入工具，默认禁用；如果是读取工具，默认允许
+        !is_write
     }
 
-    /// 过滤 MCP 工具，只返回可用的工具
-    ///
-    /// # 参数
-    /// - `server_name`: MCP 服务器名称
-    /// - `tools`: 该服务器的所有工具列表
-    ///
-    /// # 返回
-    /// 过滤后的可用工具列表
-    pub fn filter_mcp_tools(
+    /// 过滤工具列表
+    pub fn filter_tools(
         &self,
-        server_name: &str,
+        server_name: Option<&str>,
         tools: Vec<(String, crate::models::Tool)>,
     ) -> Vec<(String, crate::models::Tool)> {
         tools
             .into_iter()
-            .filter(|(tool_name, _)| self.is_mcp_tool_available(server_name, tool_name))
+            .filter(|(name, _)| {
+                if let Some(sn) = server_name {
+                    self.is_mcp_tool_available(sn, name)
+                } else {
+                    self.is_local_tool_available(name)
+                }
+            })
             .collect()
-    }
-
-    /// 过滤本地工具（本地工具总是可见，只是权限不同）
-    ///
-    /// # 参数
-    /// - `tools`: 所有本地工具列表
-    ///
-    /// # 返回
-    /// 所有本地工具（本地工具总是可见）
-    pub fn filter_local_tools(
-        &self,
-        tools: Vec<(String, crate::models::Tool)>,
-    ) -> Vec<(String, crate::models::Tool)> {
-        // 本地工具总是可见
-        tools
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tool_mask_new() {
-        let agent_id = AgentId::new();
-        let mask = ToolMask::new(agent_id);
-        assert_eq!(mask.agent_id, agent_id);
-        assert!(mask.mcp_permissions.is_empty());
-        assert!(mask.local_permissions.is_empty());
-        assert!(mask.local_tool_mode.is_none());
-    }
-
-    #[test]
-    fn test_mcp_tool_permission() {
-        let agent_id = AgentId::new();
-        let mut mask = ToolMask::new(agent_id);
-
-        mask.set_mcp_permission(
-            "server1".to_string(),
-            "tool1".to_string(),
-            McpToolPermission::Available,
-        );
-
-        assert_eq!(
-            mask.get_mcp_permission("server1", "tool1"),
-            Some(&McpToolPermission::Available)
-        );
-        assert!(mask.is_mcp_tool_available("server1", "tool1"));
-        assert!(!mask.is_mcp_tool_available("server1", "tool2"));
-    }
-
-    #[test]
-    fn test_local_tool_permission() {
-        let agent_id = AgentId::new();
-        let mut mask = ToolMask::new(agent_id);
-
-        mask.set_local_permission("tool1".to_string(), LocalToolPermission::ReadWrite);
-
-        assert_eq!(
-            mask.get_local_permission("tool1"),
-            LocalToolPermission::ReadWrite
-        );
-        // 默认只读
-        assert_eq!(
-            mask.get_local_permission("tool2"),
-            LocalToolPermission::ReadOnly
-        );
-    }
-
-    #[test]
-    fn test_local_tool_mode_override() {
-        let agent_id = AgentId::new();
-        let mut mask = ToolMask::new(agent_id);
-
-        mask.set_local_permission("tool1".to_string(), LocalToolPermission::ReadWrite);
-        mask.set_local_tool_mode(Some(LocalToolMode::ReadOnly));
-
-        // 全局模式优先，即使单个工具配置为读写
-        assert_eq!(
-            mask.get_local_permission("tool1"),
-            LocalToolPermission::ReadOnly
-        );
-
-        // 取消全局模式，使用单个工具配置
-        mask.set_local_tool_mode(None);
-        assert_eq!(
-            mask.get_local_permission("tool1"),
-            LocalToolPermission::ReadWrite
-        );
+impl Default for ToolMask {
+    fn default() -> Self {
+        Self::new()
     }
 }

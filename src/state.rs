@@ -10,6 +10,10 @@ use crate::tool_coordinator::ToolCoordinator;
 use crate::tools::LocalToolRegistry;
 use agentfs::AgentFS;
 
+// Phase 4 additions
+use crate::agent::context_manager::ContextManagerAgent;
+use crate::orchestrator::executor::OrchestratorExecutor;
+use crate::orchestrator::task_manager::SharedTaskManager;
 #[derive(Clone)]
 pub struct AppState {
     pub session_repo: SessionRepository,
@@ -21,6 +25,11 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub agent_fs: Arc<AgentFS>,
     pub checkpoint_manager: Arc<CheckpointManager>,
+
+    // Phase 4 components
+    pub orchestrator_executor: Arc<OrchestratorExecutor>,
+    pub task_manager: SharedTaskManager,
+    pub context_manager: Arc<ContextManagerAgent>,
 }
 
 impl AppState {
@@ -35,6 +44,9 @@ impl AppState {
         config: Arc<Config>,
         agent_fs: Arc<AgentFS>,
         checkpoint_manager: Arc<CheckpointManager>,
+        orchestrator_executor: Arc<OrchestratorExecutor>,
+        task_manager: SharedTaskManager,
+        context_manager: Arc<ContextManagerAgent>,
     ) -> Self {
         Self {
             session_repo,
@@ -46,6 +58,9 @@ impl AppState {
             config,
             agent_fs,
             checkpoint_manager,
+            orchestrator_executor,
+            task_manager,
+            context_manager,
         }
     }
 }

@@ -1192,337 +1192,80 @@ TaskManager 的基础功能已完成，后续可以：
 
 ---
 
-### Phase 4.6: 基础 API 扩展
+### Phase 4.6 & 4.7: 全景前端与 API 扩展 (为 Flutter 铺路)
 
 #### 任务清单
-- [ ] 设计总控管理 REST API
-- [ ] 实现总控创建 API（支持嵌套深度）
-- [ ] 实现总控查询 API（列表和详情）
-- [ ] 实现总控更新 API
-- [ ] 实现总控删除 API
-- [ ] 设计 Agent 管理 REST API
-- [ ] 实现 Agent 创建 API（通过总控）
-- [ ] 实现 Agent 查询 API（列表和详情）
-- [ ] 实现 Agent 删除 API
-- [ ] 实现 Agent 状态查询 API
-- [ ] 设计任务管理 REST API
-- [ ] 实现任务提交 API（串行）
-- [ ] 实现任务提交 API（并行）
-- [ ] 实现任务状态查询 API
-- [ ] 实现任务等待 API
-- [ ] 实现任务取消 API
-- [ ] 设计 Session 管理 REST API
-- [ ] 实现 Session 创建 API
-- [ ] 实现 Session 激活 API
-- [ ] 实现 Session 暂停 API
-- [ ] 实现 Session 归档 API
-- [ ] 实现 Session 删除 API
-- [ ] 实现 Session 查询 API（列表和详情）
-- [ ] 实现 Session 历史查询 API
-- [ ] 设计 CMA 相关 API
-- [ ] 实现求助提交 API
-- [ ] 实现 CMA 通知查询 API
+- [ ] 核心对话与 Session API 实现
+- [ ] 多 Agent 与总控管理 API 实现
+- [ ] Agent 节点深度观察 (Inspector) API 实现
+- [ ] 全景拓扑与实时流 (SSE) 模块实现
+- [ ] **像素工作室 (Pixel Studio)** 互动模块实现
+- [ ] 权限与工具掩码动态配置 API 实现
 - [ ] 添加 API 请求/响应日志
 - [ ] 添加 API 文档注释（OpenAPI/Swagger）
 - [ ] 编写 API 集成测试
 - [ ] 验证验收清单
 
-#### API 设计
+#### API 设计 (Axum 路由格式)
 
-**总控管理 API**
+为了支撑前端四大核心功能（对话、可视化配置、状态监控、像素工作室互动），后端 API 结合 Axum 框架 `.route()` 风格定义如下：
 
-`POST /api/orchestrators`
-- 创建新总控
-- 请求体：OrchestratorConfig（包含 nested_depth）
-- 响应：Orchestrator（包含生成的 ID）
-- 状态码：201 Created
+**1. 核心对话与 Session 模块 (Core & SSE)**
+```rust
+// Session 基础管理
+.route("/api/v1/sessions", get(handlers::list_sessions))
+.route("/api/v1/sessions", post(handlers::create_session))
+.route("/api/v1/sessions/{id}", get(handlers::get_session))
+.route("/api/v1/sessions/{id}", delete(handlers::delete_session))
 
-`GET /api/orchestrators`
-- 列出所有总控
-- 查询参数：role, nested_depth, page, page_size
-- 响应：{ orchestrators: Vec<Orchestrator>, total: usize, page: usize, page_size: usize }
-- 状态码：200 OK
+// 消息与流式响应 (全景大屏的"心脏脉搏")
+.route("/api/v1/sessions/{id}/messages", get(handlers::list_messages))
+.route("/api/v1/sessions/{id}/messages", post(handlers::send_message)) // 触发 OrchestratorExecutor
+.route("/api/v1/sessions/{id}/stream", get(handlers::session_stream)) // SSE：推送 agent_spawned, status_changed, communication_flash 等
+```
 
-`GET /api/orchestrators/:id`
-- 获取总控详情
-- 响应：Orchestrator
-- 状态码：200 OK, 404 Not Found
+**2. 多 Agent 与总控管理 (Topology & Creation)**
+```rust
+.route("/api/v1/orchestrators/templates", get(handlers::list_orchestrator_templates))
+.route("/api/v1/orchestrators", post(handlers::create_orchestrator))
+.route("/api/v1/orchestrators/{id}/agents", post(handlers::spawn_agent)) // 动态添加 Agent
+.route("/api/v1/orchestrators/{id}/topology", get(handlers::get_orchestrator_topology)) // 获取扁平化节点数组
+```
 
-`PUT /api/orchestrators/:id`
-- 更新总控配置
-- 请求体：部分 OrchestratorConfig 字段
-- 响应：Orchestrator
-- 状态码：200 OK, 404 Not Found
+**3. 节点深度观察模块 (Agent Inspector)**
+```rust
+.route("/api/v1/agents/{id}/context", get(handlers::get_agent_context)) // 查看工作记忆 (Prompt, Memory, Masks)
+.route("/api/v1/agents/{id}/logs", get(handlers::get_agent_logs)) // 查看 Agent 的 Thought Chain
+.route("/api/v1/agents/{id}/config", patch(handlers::update_agent_config)) // 实时修改 FsAccessLevel 等
+```
 
-`DELETE /api/orchestrators/:id`
-- 删除总控
-- 响应：204 No Content, 404 Not Found, 409 Conflict（如果有活跃任务）
+**4. 状态监控与快照管理 (Monitor & Checkpoints)**
+```rust
+.route("/api/v1/monitor/system/stats", get(handlers::get_system_stats)) // 资源占用
+.route("/api/v1/monitor/tasks/active", get(handlers::list_active_tasks)) // 活跃工单
+.route("/api/v1/tasks/{id}", delete(handlers::cancel_task)) // 取消任务
 
-**Agent 管理 API**
+// Checkpoint 回溯
+.route("/api/v1/sessions/{id}/checkpoints", get(handlers::list_checkpoints))
+.route("/api/v1/sessions/{id}/checkpoints", post(handlers::create_checkpoint))
+.route("/api/v1/sessions/{id}/checkpoints/{checkpoint_id}/restore", post(handlers::restore_checkpoint))
+```
 
-`POST /api/orchestrators/:orchestrator_id/agents`
-- 通过总控创建新 Agent
-- 请求体：AgentConfig
-- 响应：Agent（包含生成的 ID）
-- 状态码：201 Created, 404 Not Found
+**5. 像素工作室互动模块 (Pixel Studio)**
+```rust
+.route("/api/v1/studio/characters", get(handlers::get_studio_characters)) // 获取所有角色及其视觉属性 (role_class, sprite)
+.route("/api/v1/studio/interact", post(handlers::interact_with_character)) // 互动 (poke, feed) -> 返回实时吐槽 (Bark)
+.route("/api/v1/studio/achievements", get(handlers::list_studio_achievements)) 
+.route("/api/v1/tools", get(handlers::list_available_tools)) // 全局工具池
+```
 
-`GET /api/orchestrators/:orchestrator_id/agents`
-- 列出总控管理的所有 Agent
-- 查询参数：role, capability, state, page, page_size
-- 响应：{ agents: Vec<Agent>, total: usize, page: usize, page_size: usize }
-- 状态码：200 OK, 404 Not Found
-
-`GET /api/orchestrators/:orchestrator_id/agents/:id`
-- 获取 Agent 详情
-- 响应：Agent
-- 状态码：200 OK, 404 Not Found
-
-`DELETE /api/orchestrators/:orchestrator_id/agents/:id`
-- 删除 Agent
-- 响应：204 No Content, 404 Not Found, 409 Conflict（如果 Agent 忙碌）
-
-`GET /api/orchestrators/:orchestrator_id/agents/:id/state`
-- 获取 Agent 状态
-- 响应：{ state: AgentState, updated_at: DateTime }
-- 状态码：200 OK, 404 Not Found
-
-**任务管理 API**
-
-`POST /api/orchestrators/:orchestrator_id/tasks/serial`
-- 提交串行任务
-- 请求体：{ agent_id: string, task: AgentTask }
-- 响应：{ task_id: string, result: AgentTaskResult }
-- 状态码：200 OK, 404 Not Found
-
-`POST /api/orchestrators/:orchestrator_id/tasks/parallel`
-- 提交并行任务
-- 请求体：ParallelTasks
-- 响应：{ task_id: string, status: TaskStatus }
-- 状态码：202 Accepted, 404 Not Found
-
-`GET /api/orchestrators/:orchestrator_id/tasks/:id`
-- 获取任务状态
-- 响应：{ task_id: string, status: TaskStatus, results?: Vec<AgentTaskResult>, error?: string }
-- 状态码：200 OK, 404 Not Found
-
-`POST /api/orchestrators/:orchestrator_id/tasks/:id/wait`
-- 等待任务完成
-- 响应：{ task_id: string, status: TaskStatus, results: Vec<AgentTaskResult> }
-- 状态码：200 OK, 404 Not Found
-
-`DELETE /api/orchestrators/:orchestrator_id/tasks/:id`
-- 取消任务
-- 响应：204 No Content, 404 Not Found, 409 Conflict（如果任务已完成）
-
-`GET /api/orchestrators/:orchestrator_id/tasks`
-- 列出任务
-- 查询参数：agent_id, session_id, status, page, page_size
-- 响应：{ tasks: Vec<TaskInfo>, total: usize, page: usize, page_size: usize }
-- 状态码：200 OK
-
-**Session 管理 API**
-
-`POST /api/sessions`
-- 创建新 Session
-- 请求体：{ title?: string, orchestrator_id?: string }
-- 响应：Session
-- 状态码：201 Created
-
-`GET /api/sessions`
-- 列出所有 Session
-- 查询参数：state, orchestrator_id, created_before, created_after, page, page_size
-- 响应：{ sessions: Vec<Session>, total: usize, page: usize, page_size: usize }
-- 状态码：200 OK
-
-`GET /api/sessions/:id`
-- 获取 Session 详情
-- 响应：Session
-- 状态码：200 OK, 404 Not Found
-
-`POST /api/sessions/:id/activate`
-- 激活 Session
-- 响应：Session
-- 状态码：200 OK, 404 Not Found, 409 Conflict
-
-`POST /api/sessions/:id/pause`
-- 暂停 Session
-- 响应：Session
-- 状态码：200 OK, 404 Not Found, 409 Conflict
-
-`POST /api/sessions/:id/archive`
-- 归档 Session
-- 响应：Session
-- 状态码：200 OK, 404 Not Found
-
-`DELETE /api/sessions/:id`
-- 删除 Session（软删除）
-- 响应：204 No Content, 404 Not Found
-
-`DELETE /api/sessions/:id/permanent`
-- 永久删除 Session
-- 响应：204 No Content, 404 Not Found
-
-`GET /api/sessions/:id/history`
-- 获取 Session 生命周期历史
-- 响应：Vec<SessionLifecycleEvent>
-- 状态码：200 OK, 404 Not Found
-
-`GET /api/sessions/:id/checkpoints`
-- 获取 Session 的 Checkpoint 列表
-- 响应：Vec<Checkpoint>
-- 状态码：200 OK, 404 Not Found
-
-`POST /api/sessions/:id/checkpoints/:checkpoint_id/restore`
-- 恢复到指定 Checkpoint
-- 响应：Session
-- 状态码：200 OK, 404 Not Found
-
-`POST /api/sessions/:id/assign-orchestrator`
-- 为 Session 分配总控
-- 请求体：{ orchestrator_id: string }
-- 响应：Session
-- 状态码：200 OK, 404 Not Found, 409 Conflict
-
-`POST /api/sessions/:id/unassign-orchestrator`
-- 解绑总控
-- 响应：Session
-- 状态码：200 OK, 404 Not Found
-
-+**CMA 相关 API**
-+
-+`POST /api/cma/work-orders`
-+- Agent 提交工单（包括求助）
-+- 请求体：WorkOrder
-+- 响应：{ received: bool, message: string }
-+- 状态码：202 Accepted
-+
-+`GET /api/cma/work-orders`
-+- 列出工单
-+- 查询参数：session_id, agent_id, recipient, work_order_type, page, page_size
-+- 响应：{ work_orders: Vec<WorkOrder>, total: usize, page: usize, page_size: usize }
-+- 状态码：200 OK
-+
-+`GET /api/cma/notifications`
-+- 列出 CMA 通知
-+- 查询参数：session_id, orchestrator_id, type, page, page_size
-+- 响应：{ notifications: Vec<CmaNotification>, total: usize, page: usize, page_size: usize }
-+- 状态码：200 OK
-
-**TaskStatus 枚举**
-- Pending: 等待执行
-- Running: 正在执行
-- Completed: 已完成
-- Failed: 失败
-- Cancelled: 已取消
-
-#### 测试策略
-- API 集成测试：使用测试客户端测试所有端点
-- 错误处理测试：验证各种错误场景的响应
-- 认证测试（如果有）：验证访问控制
-- 性能测试：基本的负载测试
-
-#### 验收标准
-- [ ] 可以通过 API 创建总控（支持嵌套深度）
-- [ ] 可以通过 API 查询总控列表和详情
-- [ ] 可以通过 API 更新总控
-- [ ] 可以通过 API 删除总控
-- [ ] 可以通过 API 创建 Agent
-- [ ] 可以通过 API 查询 Agent 列表和详情
-- [ ] 可以通过 API 删除空闲 Agent
-- [ ] 不能通过 API 删除忙碌 Agent
-- [ ] 可以查询 Agent 状态
-- [ ] 可以通过 API 提交串行任务
-- [ ] 可以通过 API 提交并行任务
-- [ ] 可以查询任务状态
-- [ ] 可以等待任务完成
-- [ ] 可以取消待执行的任务
-- [ ] 可以通过 API 创建 Session
-- [ ] 可以通过 API 查询 Session 列表和详情
-- [ ] 可以通过 API 激活、暂停、归档 Session
-- [ ] 可以通过 API 删除 Session
-- [ ] 可以查询 Session 历史和 Checkpoint
-- [ ] 可以恢复到指定 Checkpoint
-- [ ] 可以为 Session 分配和解绑总控
-- [ ] 可以通过 API 提交工单（包括求助）
-- [ ] 可以查询工单和 CMA 通知
-- [ ] 所有 API 端点都有适当的日志
-- [ ] 错误响应格式一致
-- [ ] 所有 API 集成测试通过
-
----
-
-## 🔌 第三优先级：集成
-
-### Phase 4.7: 监控与可视化 API (为前端铺路)
-
-#### 目标
-为 Phase 8 的 Flutter 全景可视化前端提供丰富的实时数据流和历史追踪接口，支持对多 Agent 协作网络、工单流转和 Checkpoint 变更的全方位监控。
-
-#### 任务清单
-- [ ] 设计并实现实时状态总线 (SSE)
-- [ ] 实现 Agent 状态实时推送接口
-- [ ] 实现工单 (WorkOrder) 生命周期事件推送
-- [ ] 实现 CMA 告警与干预事件推送
-- [ ] 设计历史追踪 API
-- [ ] 实现 Session 完整消息链路查询
-- [ ] 实现 Agent 级执行日志检索
-- [ ] 增强 Checkpoint API
-- [ ] 实现 Checkpoint 文件树可视化接口
-- [ ] 实现代码变更差异 (Diff) 分析接口
-- [ ] 实现监控模式权限控制 (ReadOnly vs Admin)
-- [ ] 编写前端模拟器进行 API 验证
-- [ ] 编写集成测试
-
-#### 核心概念（监控模型）
-
-**实时状态总线 (Status Bus)**
-- 基于 SSE (Server-Sent Events) 的单向推送机制。
-- 订阅模型：前端可以订阅全局事件或特定 Session/Agent 的事件。
-
-**事件类型定义**
-- `AgentStateChanged`: 状态切换 (Idle -> Busy -> WaitingForReview)。
-- `WorkOrderEvent`: 工单创建、指派、状态更新。
-- `CmaEvent`: 上下文裁剪通知、持续犯错告警、强制回滚建议。
-- `TaskProgress`: 任务执行百分比或阶段性产出。
-
-**可视化视图支持**
-- **拓扑视图 (Topology)**: 提供父子 Orchestrator 和 Worker Agent 的层级关系数据。
-- **时间轴视图 (Timeline)**: 提供 Checkpoint 的线性增长曲线。
-- **对比视图 (Diff)**: 提供两个 Checkpoint 之间文件系统状态的差异描述。
-
-#### 架构设计
-
-**SSE 控制器 (SseController)**
-- 维护所有活跃的 SSE 连接，集成到现有 Axum 路由中。
-- 提供广播 (Broadcast) 和定向推送 (Unicast) 能力。
-
-**事件转发器 (EventForwarder)**
-- 监听内部 Executor 的关键动作，将内部状态变更包装为标准可视化事件。
-
-**差异对比引擎 (DiffEngine)**
-- 调用 `AgentFS` 的比较功能，返回 JSON 格式的变更列表（Added, Modified, Deleted）。
-
-#### API 设计
-
-**1. 建立监控连接**
-- `GET /api/v1/monitor/events?session_id={id}`
-- 返回 SSE 流。
-
-**2. 获取全景拓扑**
-- `GET /api/v1/monitor/topology?session_id={id}`
-- 返回 Agent 树状层级结构。
-
-**3. 获取 Checkpoint 差异**
-- `GET /api/v1/monitor/checkpoints/{id}/diff?compare_with={other_id}`
-- 返回两个快照间的差异数据。
-
-#### 验收标准
-- [ ] SSE 连接可以正常建立且稳定
-- [ ] Agent 状态切换与工单状态变更能实时推送
-- [ ] CMA 干预事件能准确捕捉并推送
-- [ ] 可以通过 API 获取 Session 的 Agent 树状拓扑
-- [ ] 可以正确计算并返回 Checkpoint 间的 Diff
-- [ ] 监控模式下的权限隔离有效
+#### 测试与验收标准
+- [ ] 可以建立稳定可靠的 SSE 连接，并实时推送角色入职、动作切换、通信闪烁等事件。
+- [ ] 可以通过 API 获取 Agent 的深度上下文（Prompt、裁剪后的记忆等）。
+- [ ] 像素工作室 API 能根据 Agent 角色正确映射视觉类型（Boss, Coder, Reviewer 等）。
+- [ ] 互动接口能根据当前 Agent 的上下文状态生成对应的吐槽文本。
+- [ ] 具备完整的基于 Checkpoint 的状态回滚能力。
+- [ ] 所有 API 集成测试通过。
 
 ---
 

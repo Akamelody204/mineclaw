@@ -2,13 +2,12 @@
 //!
 //! 负责协调 LLM 和 MCP 工具之间的交互，实现工具调用循环。
 
-use crate::agent::AgentId;
 use crate::checkpoint::CheckpointManager;
 use crate::error::{Error, Result};
 use crate::llm::{ChatMessage, ChatTool, LlmProvider};
 use crate::mcp::{ExecutionResult, McpServerManager, ToolExecutor};
 use crate::models::{Message, MessageRole, Session, Tool, ToolCall, ToolResult};
-use crate::tool_mask::{ToolMask, ToolMaskRepository};
+use crate::tool_mask::types::ToolMask;
 use crate::tools::{LocalToolRegistry, ToolContext};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -61,7 +60,6 @@ pub struct ToolCoordinator {
     local_tool_registry: Arc<LocalToolRegistry>,
     config: Arc<crate::config::Config>,
     checkpoint_manager: Option<Arc<CheckpointManager>>,
-    tool_mask_repository: Option<Arc<dyn ToolMaskRepository>>,
     /// 最大工具调用轮数
     max_iterations: usize,
 }
@@ -82,7 +80,6 @@ impl ToolCoordinator {
             local_tool_registry,
             config,
             checkpoint_manager: None,
-            tool_mask_repository: None,
             max_iterations: 10,
         }
     }
@@ -90,15 +87,6 @@ impl ToolCoordinator {
     /// 设置 CheckpointManager
     pub fn with_checkpoint_manager(mut self, checkpoint_manager: Arc<CheckpointManager>) -> Self {
         self.checkpoint_manager = Some(checkpoint_manager);
-        self
-    }
-
-    /// 设置 ToolMaskRepository
-    pub fn with_tool_mask_repository(
-        mut self,
-        tool_mask_repository: Arc<dyn ToolMaskRepository>,
-    ) -> Self {
-        self.tool_mask_repository = Some(tool_mask_repository);
         self
     }
 
@@ -259,39 +247,30 @@ impl ToolCoordinator {
     }
 
     /// 获取 Agent 可见的工具列表（过滤后的）
+    /// 获取 Agent 可用的工具列表
     ///
-    /// 如果没有配置 tool_mask_repository，则返回所有工具。
-    /// 如果 Agent 没有 ToolMask 配置，则：
-    /// - MCP 工具默认不可用
-    /// - 本地工具默认可见（只读）
+    /// 根据 Agent 嵌入的 ToolMask 进行过滤。如果没有配置掩码，则应用默认策略：
+    /// - MCP 工具默认不可见
+    /// - 本地工具遵循默认的只读逻辑（排除写入型工具）
     pub async fn get_available_tools_for_agent(
         &self,
-        agent_id: AgentId,
+        agent: &crate::agent::Agent,
     ) -> Result<Vec<(String, Tool)>> {
-        // 如果没有配置 tool_mask_repository，返回所有工具
-        let Some(repo) = &self.tool_mask_repository else {
-            return Ok(self.get_all_available_tools().await);
-        };
+        // 获取 Agent 绑定的掩码，如果没有则使用默认掩码（默认只读模式）
+        let mask = agent.tool_mask.clone().unwrap_or_else(ToolMask::readonly);
 
-        // 获取 Agent 的 ToolMask，如果不存在则创建默认的
-        let mask = if repo.exists(agent_id).await? {
-            repo.get(agent_id).await?
-        } else {
-            ToolMask::new(agent_id)
-        };
-
-        // 获取所有工具，然后按服务器分组
+        // 获取所有 MCP 工具
         let manager = self.mcp_server_manager.lock().await;
         let all_mcp_tools = manager.all_tools();
 
-        // 按服务器名称分组 MCP 工具
+        // 按服务器名称分组 MCP 工具以便批量过滤
         let mut mcp_tools_by_server: std::collections::HashMap<String, Vec<(String, Tool)>> =
             std::collections::HashMap::new();
         for (server_name, tool) in all_mcp_tools {
             mcp_tools_by_server
                 .entry(server_name.clone())
-                .or_insert_with(Vec::new)
-                .push((server_name, tool));
+                .or_default()
+                .push((tool.name.clone(), tool));
         }
         drop(manager);
 
@@ -299,18 +278,18 @@ impl ToolCoordinator {
 
         // 过滤 MCP 工具
         for (server_name, server_tools) in mcp_tools_by_server {
-            let filtered = mask.filter_mcp_tools(&server_name, server_tools);
+            let filtered = mask.filter_tools(Some(&server_name), server_tools);
             tools.extend(filtered);
         }
 
-        // 添加本地工具（本地工具总是可见）
+        // 获取本地工具并应用过滤
         let local_tools = self.local_tool_registry.list_tools();
         let local_tools_with_names: Vec<_> = local_tools
             .into_iter()
             .map(|t| (t.name.clone(), t))
             .collect();
-        let filtered_local = mask.filter_local_tools(local_tools_with_names);
-        tools.extend(filtered_local);
+
+        tools.extend(mask.filter_tools(None, local_tools_with_names));
 
         Ok(tools)
     }

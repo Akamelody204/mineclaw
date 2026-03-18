@@ -19,10 +19,12 @@ async fn test_read_write_file() {
     let temp_dir = tempdir().unwrap();
     let test_file = temp_dir.path().join("test.txt");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -79,10 +81,12 @@ async fn test_list_directory() {
     let original_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(temp_dir_abs.parent().unwrap()).unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir_str.clone()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir_str.clone()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -181,10 +185,12 @@ async fn test_delete_file() {
     std::fs::write(&test_file, "Test content").unwrap();
     assert!(test_file.exists());
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -211,10 +217,12 @@ async fn test_delete_file() {
 async fn test_path_traversal_protection() {
     let temp_dir = tempdir().unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -247,10 +255,12 @@ async fn test_search_file() {
     )
     .unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -309,10 +319,12 @@ async fn test_move_file() {
     assert!(source.exists());
     assert!(!dest.exists());
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -342,10 +354,12 @@ async fn test_create_and_delete_directory() {
     let temp_dir = tempdir().unwrap();
     let test_dir = temp_dir.path().join("test_dir");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -394,10 +408,12 @@ async fn test_move_directory() {
     assert!(source_dir.exists());
     assert!(!dest_dir.exists());
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -429,10 +445,12 @@ async fn test_search_and_replace() {
 
     std::fs::write(&test_file, "Line A: foo\nLine B: bar\nLine C: foo").unwrap();
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -493,10 +511,12 @@ async fn test_replace_all_keywords() {
     let temp_dir = tempdir().unwrap();
     let test_file = temp_dir.path().join("replace_all_test.txt");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();
@@ -594,10 +614,12 @@ async fn test_replace_no_chained_replacement() {
     let temp_dir = tempdir().unwrap();
     let test_file = temp_dir.path().join("no_chained_replace_test.txt");
 
-    let mut config = Config::default();
-    config.filesystem = FilesystemConfig {
-        max_read_bytes: 16384,
-        allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+    let config = Config {
+        filesystem: FilesystemConfig {
+            max_read_bytes: 16384,
+            allowed_directories: vec![temp_dir.path().to_string_lossy().to_string()],
+        },
+        ..Config::default()
     };
 
     let mut registry = LocalToolRegistry::new();

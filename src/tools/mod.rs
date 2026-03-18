@@ -12,11 +12,13 @@ use std::sync::Arc;
 
 pub mod checkpoint;
 pub mod filesystem;
+pub mod orchestration;
 pub mod registry;
 pub mod shell_detection;
 pub mod terminal;
 
 pub use self::checkpoint::{CheckpointTools, ListCheckpointsTool, RestoreCheckpointTool};
+pub use self::orchestration::OrchestrationInterface;
 pub use registry::LocalToolRegistry;
 
 // ==================== ToolContext ====================
@@ -30,6 +32,8 @@ pub struct ToolContext {
     pub config: Arc<Config>,
     /// Checkpoint 管理器
     pub checkpoint_manager: Option<Arc<CheckpointManager>>,
+    /// 总控接口（用于协作工具）
+    pub orchestrator: Option<Arc<dyn OrchestrationInterface>>,
 }
 
 impl ToolContext {
@@ -39,12 +43,19 @@ impl ToolContext {
             session,
             config,
             checkpoint_manager: None,
+            orchestrator: None,
         }
     }
 
     /// 设置 Checkpoint 管理器
     pub fn with_checkpoint_manager(mut self, checkpoint_manager: Arc<CheckpointManager>) -> Self {
         self.checkpoint_manager = Some(checkpoint_manager);
+        self
+    }
+
+    /// 设置总控接口
+    pub fn with_orchestrator(mut self, orchestrator: Arc<dyn OrchestrationInterface>) -> Self {
+        self.orchestrator = Some(orchestrator);
         self
     }
 }

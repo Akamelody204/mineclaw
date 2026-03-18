@@ -74,6 +74,24 @@ pub enum AgentRole {
     ContextManager,
 }
 
+impl std::str::FromStr for AgentRole {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let normalized = s.to_lowercase().replace("_", "").replace("-", "");
+        match normalized.as_str() {
+            "masterorchestrator" | "master" => Ok(Self::MasterOrchestrator),
+            "suborchestrator" | "sub" => Ok(Self::SubOrchestrator),
+            "worker" => Ok(Self::Worker),
+            "contextmanager" | "cma" => Ok(Self::ContextManager),
+            _ => Err(crate::error::Error::InvalidInput(format!(
+                "Invalid agent role: {}",
+                s
+            ))),
+        }
+    }
+}
+
 impl fmt::Display for AgentRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -235,6 +253,8 @@ pub struct Agent {
     pub nested_depth: Option<u8>,
     /// 父总控 ID（仅 SubOrchestrator 有）
     pub parent_orchestrator_id: Option<AgentId>,
+    /// 工具掩码
+    pub tool_mask: Option<crate::tool_mask::types::ToolMask>,
     /// 创建时间
     pub created_at: DateTime<Utc>,
     /// 最后更新时间
@@ -255,6 +275,7 @@ impl Agent {
             system_prompt: config.system_prompt,
             nested_depth: config.nested_depth,
             parent_orchestrator_id: config.parent_orchestrator_id,
+            tool_mask: config.tool_mask,
             created_at: now,
             updated_at: now,
         }
@@ -308,6 +329,8 @@ pub struct AgentConfig {
     pub nested_depth: Option<u8>,
     /// 父总控 ID（仅 SubOrchestrator 需要）
     pub parent_orchestrator_id: Option<AgentId>,
+    /// 工具掩码
+    pub tool_mask: Option<crate::tool_mask::types::ToolMask>,
 }
 
 impl AgentConfig {
@@ -326,6 +349,7 @@ impl AgentConfig {
             system_prompt,
             nested_depth: None,
             parent_orchestrator_id: None,
+            tool_mask: None,
         }
     }
 
@@ -350,6 +374,12 @@ impl AgentConfig {
     /// 设置父总控 ID（用于 SubOrchestrator）
     pub fn with_parent_orchestrator(mut self, parent_id: AgentId) -> Self {
         self.parent_orchestrator_id = Some(parent_id);
+        self
+    }
+
+    /// 设置工具掩码
+    pub fn with_tool_mask(mut self, tool_mask: crate::tool_mask::types::ToolMask) -> Self {
+        self.tool_mask = Some(tool_mask);
         self
     }
 

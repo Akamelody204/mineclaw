@@ -17,6 +17,8 @@ pub use types::*;
 pub use work_order::*;
 
 use crate::error::{Error, Result};
+use crate::tools::orchestration::OrchestrationInterface;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Agent 执行器
@@ -48,12 +50,17 @@ impl AgentExecutor {
     /// 执行任务
     ///
     /// # 参数
-    /// * `agent` - 要执行任务的 Agent
+    /// * `agent` - 要执行任务 of the Agent
     /// * `task` - 任务信息
+    /// * `orchestrator` - 总控接口（可选，用于协作工具）
     ///
     /// # 返回
     /// 返回任务执行结果或错误
-    pub async fn execute_task(agent: &mut Agent, task: AgentTask) -> Result<AgentTaskResult> {
+    pub async fn execute_task(
+        agent: &mut Agent,
+        task: AgentTask,
+        _orchestrator: Option<Arc<dyn OrchestrationInterface>>,
+    ) -> Result<AgentTaskResult> {
         debug!(agent_id = %agent.id, session_id = %task.session_id, "Executing task");
 
         // 验证任务是否分配给了正确的 Agent

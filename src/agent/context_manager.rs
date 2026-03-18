@@ -263,43 +263,46 @@ impl ContextManagerAgent {
         self.store.add_chunk(chunk).await;
 
         // 获取当前元数据以检查 Token 数
-        if let Some(metadata) = self.store.get_metadata(&session_id).await {
-            if metadata.total_token_count > self.global_max_tokens {
-                info!(
-                    session_id = %session_id,
-                    current_tokens = %metadata.total_token_count,
-                    limit = %self.global_max_tokens,
-                    "Context limit exceeded, triggering auto-trim"
-                );
+        if let Some(metadata) = self
+            .store
+            .get_metadata(&session_id)
+            .await
+            .filter(|m| m.total_token_count > self.global_max_tokens)
+        {
+            info!(
+                session_id = %session_id,
+                current_tokens = %metadata.total_token_count,
+                limit = %self.global_max_tokens,
+                "Context limit exceeded, triggering auto-trim"
+            );
 
-                // 执行裁剪
-                let chunks = self.store.get_chunks(&session_id).await;
-                let target_tokens = (self.global_max_tokens as f64 * 0.8) as usize;
-                let (remaining, _removed) = self.default_strategy.trim(chunks, target_tokens);
+            // 执行裁剪
+            let chunks = self.store.get_chunks(&session_id).await;
+            let target_tokens = (self.global_max_tokens as f64 * 0.8) as usize;
+            let (remaining, _removed) = self.default_strategy.trim(chunks, target_tokens);
 
-                let removed_count = metadata.chunk_count - remaining.len();
-                self.store
-                    .update_session_chunks(session_id, remaining)
-                    .await;
+            let removed_count = metadata.chunk_count - remaining.len();
+            self.store
+                .update_session_chunks(session_id, remaining)
+                .await;
 
-                info!(
-                    session_id = %session_id,
-                    removed_chunks = %removed_count,
-                    "Context trimmed successfully"
-                );
+            info!(
+                session_id = %session_id,
+                removed_chunks = %removed_count,
+                "Context trimmed successfully"
+            );
 
-                // 通知总控上下文已裁剪
-                if let Some(orchestrator_id) = session.orchestrator_id {
-                    return Ok(Some(CmaNotification::new(
-                        CmaNotificationType::ContextTrimmed,
-                        session_id,
-                        orchestrator_id,
-                        format!(
-                            "Automatically trimmed {} chunks due to token limit",
-                            removed_count
-                        ),
-                    )));
-                }
+            // 通知总控上下文已裁剪
+            if let Some(orchestrator_id) = session.orchestrator_id {
+                return Ok(Some(CmaNotification::new(
+                    CmaNotificationType::ContextTrimmed,
+                    session_id,
+                    orchestrator_id,
+                    format!(
+                        "Automatically trimmed {} chunks due to token limit",
+                        removed_count
+                    ),
+                )));
             }
         }
 

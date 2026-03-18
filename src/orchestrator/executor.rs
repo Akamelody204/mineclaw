@@ -18,6 +18,12 @@ use super::types::{
     TaskStatus,
 };
 
+use crate::tools::orchestration::OrchestrationInterface;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 /// 总控执行器
 ///
 /// 负责创建总控、管理 Agent、分配任务和处理工单等功能。
@@ -181,6 +187,7 @@ impl OrchestratorExecutor {
         orchestrator: &mut Orchestrator,
         agent_id: &AgentId,
         task: AgentTask,
+        provider: Option<Arc<dyn OrchestrationInterface>>,
     ) -> Result<AgentTaskResult> {
         debug!(
             orchestrator_id = %orchestrator.id,
@@ -194,7 +201,7 @@ impl OrchestratorExecutor {
             .ok_or_else(|| Error::AgentNotFound(agent_id.to_string()))?;
 
         // 执行任务
-        let result = AgentExecutor::execute_task(agent, task).await?;
+        let result = AgentExecutor::execute_task(agent, task, provider).await?;
 
         info!(
             orchestrator_id = %orchestrator.id,
@@ -219,6 +226,7 @@ impl OrchestratorExecutor {
         orchestrator: &Orchestrator,
         parallel_tasks: ParallelTasks,
         task_manager: Option<&SharedTaskManager>,
+        _provider: Option<Arc<dyn OrchestrationInterface>>,
     ) -> Result<TaskId> {
         debug!(
             orchestrator_id = %orchestrator.id,
@@ -264,15 +272,13 @@ impl OrchestratorExecutor {
     ) -> Option<TaskStatus> {
         if let Some(tm) = task_manager {
             let tm_guard = tm.lock().await;
-            tm_guard
-                .get_task_status(task_id)
-                .map(|s| match s {
-                    TaskManagerTaskStatus::Pending => TaskStatus::Pending,
-                    TaskManagerTaskStatus::Running => TaskStatus::Running,
-                    TaskManagerTaskStatus::Completed => TaskStatus::Completed,
-                    TaskManagerTaskStatus::Failed => TaskStatus::Failed,
-                    TaskManagerTaskStatus::Cancelled => TaskStatus::Failed, // 映射到 Failed 保持兼容
-                })
+            tm_guard.get_task_status(task_id).map(|s| match s {
+                TaskManagerTaskStatus::Pending => TaskStatus::Pending,
+                TaskManagerTaskStatus::Running => TaskStatus::Running,
+                TaskManagerTaskStatus::Completed => TaskStatus::Completed,
+                TaskManagerTaskStatus::Failed => TaskStatus::Failed,
+                TaskManagerTaskStatus::Cancelled => TaskStatus::Failed, // 映射到 Failed 保持兼容
+            })
         } else {
             // 占位实现
             Some(TaskStatus::Completed)
@@ -438,6 +444,164 @@ impl OrchestratorExecutor {
     /// 返回更新后的总控
     pub fn associate_session(orchestrator: Orchestrator, session_id: Uuid) -> Orchestrator {
         orchestrator.with_session_id(session_id)
+    }
+}
+
+// ==================== OrchestrationProvider ====================
+
+/// 总控接口实现
+///
+/// 为本地工具提供访问总控能力的能力，同时保持模块解耦。
+#[derive(Debug, Clone)]
+pub struct OrchestratorProvider {
+    /// 共享的总控状态
+    pub orchestrator: Arc<RwLock<Orchestrator>>,
+    /// 共享的任务管理器
+    pub task_manager: Option<SharedTaskManager>,
+}
+
+impl OrchestratorProvider {
+    /// 创建新的总控提供者
+    pub fn new(
+        orchestrator: Arc<RwLock<Orchestrator>>,
+        task_manager: Option<SharedTaskManager>,
+    ) -> Self {
+        Self {
+            orchestrator,
+            task_manager,
+        }
+    }
+}
+
+#[async_trait]
+impl OrchestrationInterface for OrchestratorProvider {
+    async fn submit_report_work_order(
+        &self,
+        completed_details: &str,
+        related_files: &[String],
+        next_stage_plan: &str,
+    ) -> Result<Value> {
+        let orch = self.orchestrator.read().await;
+
+        // 构造 PLAN.md 规范要求的工单内容
+        let work_order_content = json!({
+            "completed_details": completed_details,
+            "related_files": related_files,
+            "next_stage_plan": next_stage_plan,
+        });
+
+        info!(
+            orchestrator_id = %orch.id,
+            "Work order (Report) submitted via tool"
+        );
+
+        // 在 Phase 5 中，这里会触发真正的工单发送逻辑。
+        // 目前返回格式化的 JSON 以供 Agent 确认。
+        Ok(json!({
+            "status": "submitted",
+            "type": "report",
+            "work_order": work_order_content
+        }))
+    }
+
+    async fn submit_help_work_order(
+        &self,
+        problem_description: &str,
+        current_status: &str,
+    ) -> Result<Value> {
+        let orch = self.orchestrator.read().await;
+
+        info!(
+            orchestrator_id = %orch.id,
+            "Work order (Help) submitted via tool"
+        );
+
+        Ok(json!({
+            "status": "submitted",
+            "type": "help",
+            "problem": problem_description,
+            "current_status": current_status
+        }))
+    }
+
+    async fn spawn_sub_agent(&self, name: &str, role: &str, capability: &str) -> Result<String> {
+        let mut orch = self.orchestrator.write().await;
+
+        // 解析角色
+        use std::str::FromStr;
+        let agent_role = crate::agent::AgentRole::from_str(role)?;
+
+        // 构造配置，继承父节点的部分环境
+        let agent_config = AgentConfig::new(
+            name.to_string(),
+            agent_role,
+            orch.agent.llm_config.clone(),
+            format!("You are a specialized agent. Capability: {}", capability),
+        )
+        .with_capability(capability.to_string());
+
+        // 执行创建逻辑
+        // 因为 OrchestratorExecutor::create_agent 消费 Orchestrator，
+        // 我们利用 Orchestrator 是 Clone 的特性进行原地更新。
+        let (new_orch, agent) = OrchestratorExecutor::create_agent(orch.clone(), agent_config)?;
+        *orch = new_orch;
+
+        Ok(agent.id.to_string())
+    }
+
+    async fn assign_task(
+        &self,
+        target_agent_id: &str,
+        instruction: &str,
+        is_parallel: bool,
+    ) -> Result<Value> {
+        let mut orch = self.orchestrator.write().await;
+        let agent_id = AgentId::parse_str(target_agent_id)?;
+
+        let session_id = orch.session_id.ok_or_else(|| {
+            Error::InvalidConfig("Orchestrator has no associated session".to_string())
+        })?;
+
+        let task = AgentTask {
+            agent_id,
+            session_id,
+            user_message: instruction.to_string(),
+            tools: None,
+            checkpoint_id: None,
+        };
+
+        if is_parallel {
+            let main_task_id = TaskId::new();
+            let sub_task_id = TaskId::new();
+            let mut parallel_tasks = ParallelTasks::new(main_task_id, true);
+            parallel_tasks.add_assignment(crate::orchestrator::types::TaskAssignment::new(
+                sub_task_id,
+                agent_id,
+                task,
+            ));
+
+            let task_id = OrchestratorExecutor::assign_task_parallel(
+                &orch,
+                parallel_tasks,
+                self.task_manager.as_ref(),
+                Some(Arc::new(self.clone())),
+            )
+            .await?;
+
+            Ok(json!({
+                "task_id": task_id.to_string(),
+                "status": "Running"
+            }))
+        } else {
+            let result = OrchestratorExecutor::assign_task_serial(
+                &mut orch,
+                &agent_id,
+                task,
+                Some(Arc::new(self.clone())),
+            )
+            .await?;
+            Ok(serde_json::to_value(result)?)
+        }
     }
 }
 
@@ -739,7 +903,8 @@ mod tests {
             "Test reason".to_string(),
         );
 
-        let result = OrchestratorExecutor::handle_cma_notification(orchestrator, notification, None);
+        let result =
+            OrchestratorExecutor::handle_cma_notification(orchestrator, notification, None);
         assert!(result.is_ok());
     }
 }

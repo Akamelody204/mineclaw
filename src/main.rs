@@ -5,8 +5,12 @@ use std::net::SocketAddr;
 use agentfs::AgentFS;
 use agentsql::SqlBackend;
 use axum::serve;
+use mineclaw::agent::context::ContextStore;
+use mineclaw::agent::context_manager::ContextManagerAgent;
 use mineclaw::checkpoint::CheckpointManager;
 use mineclaw::mcp::{McpServerManager, ToolExecutor};
+use mineclaw::orchestrator::executor::OrchestratorExecutor;
+use mineclaw::orchestrator::task_manager::TaskManager;
 use mineclaw::tools::{
     LocalToolRegistry, checkpoint::CheckpointTools, filesystem::FilesystemTool,
     terminal::TerminalTool,
@@ -56,6 +60,14 @@ async fn main() -> mineclaw::Result<()> {
 
     let session_repo = SessionRepository::new();
     let llm_provider = create_provider(config.llm.clone());
+
+    // 初始化 Phase 4 组件
+    info!("Initializing TaskManager and ContextManagerAgent...");
+    let task_manager = Arc::new(tokio::sync::Mutex::new(TaskManager::new()));
+    let context_store = ContextStore::new();
+    // 默认最大上下文设置为 100,000 tokens
+    let context_manager = Arc::new(ContextManagerAgent::new(context_store, 100000));
+    let orchestrator_executor = Arc::new(OrchestratorExecutor);
 
     // 初始化 MCP 服务器管理器
     let mut mcp_server_manager = McpServerManager::new();
@@ -129,6 +141,9 @@ async fn main() -> mineclaw::Result<()> {
         config_arc,
         agent_fs,
         checkpoint_manager,
+        orchestrator_executor,
+        task_manager,
+        context_manager,
     );
     let app = create_router(app_state);
 

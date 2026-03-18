@@ -148,6 +148,7 @@ impl TaskInfo {
 /// Task Manager - 任务生命周期管理器
 ///
 /// 负责管理任务的注册、状态跟踪、结果收集和清理。
+#[derive(Debug)]
 pub struct TaskManager {
     /// 任务信息映射
     tasks: HashMap<TaskId, TaskInfo>,
@@ -351,17 +352,19 @@ impl TaskManager {
                     }
                 }
                 TaskStatus::Cancelled => {
-                    return Err(Error::AgentExecution(format!("Task {} was cancelled", task_id)));
+                    return Err(Error::AgentExecution(format!(
+                        "Task {} was cancelled",
+                        task_id
+                    )));
                 }
                 _ => {}
             }
         }
 
         // 任务还在运行，等待 JoinHandle
-        let handle = self
-            .join_handles
-            .remove(task_id)
-            .ok_or_else(|| Error::InvalidConfig(format!("Task {} not found or not running", task_id)))?;
+        let handle = self.join_handles.remove(task_id).ok_or_else(|| {
+            Error::InvalidConfig(format!("Task {} not found or not running", task_id))
+        })?;
 
         // handle.await 返回 Result<Result<AgentTaskResult, Error>, JoinError>
         let join_result = handle.await.map_err(|e| {

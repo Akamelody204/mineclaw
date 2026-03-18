@@ -142,7 +142,6 @@ pub struct Config {
     pub local_tools: LocalToolsConfig,
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
-    #[serde(default = "default_agentfs_db_path")]
     pub agentfs_db_path: String,
     pub encryption: Option<EncryptionConfig>,
 }
