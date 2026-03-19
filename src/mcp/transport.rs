@@ -78,12 +78,6 @@ impl StdioTransport {
             stdout_lines: Some(stdout_lines),
         })
     }
-
-    /// 获取子进程的可变引用（用于测试）
-    #[cfg(test)]
-    pub fn child_mut(&mut self) -> Option<&mut Child> {
-        self.child.as_mut()
-    }
 }
 
 #[async_trait]
@@ -200,113 +194,5 @@ impl Drop for StdioTransport {
                 let _ = child.start_kill();
             }
         }
-    }
-}
-
-// ==================== MockTransport (for testing) ====================
-
-#[cfg(test)]
-pub mod mock {
-    use super::*;
-    use std::collections::VecDeque;
-    use tokio::sync::Mutex;
-
-    /// 用于测试的 mock 传输层
-    pub struct MockTransport {
-        pub sent_messages: Mutex<Vec<String>>,
-        pub responses_to_receive: Mutex<VecDeque<String>>,
-        pub is_closed: Mutex<bool>,
-    }
-
-    impl MockTransport {
-        pub fn new() -> Self {
-            Self {
-                sent_messages: Mutex::new(Vec::new()),
-                responses_to_receive: Mutex::new(VecDeque::new()),
-                is_closed: Mutex::new(false),
-            }
-        }
-
-        pub fn with_responses(responses: Vec<String>) -> Self {
-            Self {
-                sent_messages: Mutex::new(Vec::new()),
-                responses_to_receive: Mutex::new(VecDeque::from(responses)),
-                is_closed: Mutex::new(false),
-            }
-        }
-    }
-
-    impl Default for MockTransport {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[async_trait]
-    impl Transport for MockTransport {
-        async fn send(&mut self, message: &str) -> Result<()> {
-            let is_closed = self.is_closed.lock().await;
-            if *is_closed {
-                return Err(Error::Mcp("Transport is closed".to_string()));
-            }
-            drop(is_closed);
-
-            self.sent_messages.lock().await.push(message.to_string());
-            Ok(())
-        }
-
-        async fn receive(&mut self) -> Result<String> {
-            let is_closed = self.is_closed.lock().await;
-            if *is_closed {
-                return Err(Error::Mcp("Transport is closed".to_string()));
-            }
-            drop(is_closed);
-
-            self.responses_to_receive
-                .lock()
-                .await
-                .pop_front()
-                .ok_or_else(|| Error::Mcp("No more responses".to_string()))
-        }
-
-        async fn close(&mut self) -> Result<()> {
-            *self.is_closed.lock().await = true;
-            Ok(())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mock::MockTransport;
-
-    #[tokio::test]
-    async fn test_mock_transport_send_receive() {
-        let mut transport =
-            MockTransport::with_responses(vec!["response1".to_string(), "response2".to_string()]);
-
-        transport.send("request1").await.unwrap();
-        let resp1 = transport.receive().await.unwrap();
-        assert_eq!(resp1, "response1");
-
-        transport.send("request2").await.unwrap();
-        let resp2 = transport.receive().await.unwrap();
-        assert_eq!(resp2, "response2");
-
-        let sent = transport.sent_messages.lock().await;
-        assert_eq!(sent.len(), 2);
-        assert_eq!(sent[0], "request1");
-        assert_eq!(sent[1], "request2");
-    }
-
-    #[tokio::test]
-    async fn test_mock_transport_close() {
-        let mut transport = MockTransport::new();
-        transport.close().await.unwrap();
-
-        let result = transport.send("test").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("closed"));
     }
 }

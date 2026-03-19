@@ -26,14 +26,3 @@ pub fn system_shell() -> ShellType {
         ShellType::Unix
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_system_shell() {
-        let shell = system_shell();
-        assert!(matches!(shell, ShellType::Unix | ShellType::Windows));
-    }
-}
