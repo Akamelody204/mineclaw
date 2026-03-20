@@ -16,15 +16,20 @@ pub use work_order::*;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::llm::{ChatMessage, LlmProviderRegistry};
+use crate::llm::{ChatMessage, ChatTool, LlmProviderRegistry};
+use crate::models::ToolCall;
 use crate::tool_mask::types::ToolMask;
 use crate::tools::orchestration::OrchestrationInterface;
+use crate::tools::ToolContext;
 use std::sync::Arc;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info};
+use crate::mcp::ExecutionResult;
 
 /// Agent 执行器
 ///
 /// 负责创建 Agent、执行任务和发送工单
+#[derive(Clone)]
 pub struct AgentExecutor {
     /// LLM 提供者注册表
     pub provider_registry: Arc<LlmProviderRegistry>,
@@ -68,8 +73,10 @@ impl AgentExecutor {
         let manager = self.mcp_server_manager.lock().await;
         let all_mcp_tools = manager.all_tools();
 
-        let mut mcp_tools_by_server: std::collections::HashMap<String, Vec<(String, crate::models::Tool)>> =
-            std::collections::HashMap::new();
+        let mut mcp_tools_by_server: std::collections::HashMap<
+            String,
+            Vec<(String, crate::models::Tool)>,
+        > = std::collections::HashMap::new();
         for (server_name, tool) in all_mcp_tools {
             mcp_tools_by_server
                 .entry(server_name.clone())
@@ -133,7 +140,6 @@ impl AgentExecutor {
     ) -> Result<AgentTaskResult> {
         debug!(agent_id = %agent.id, session_id = %task.session_id, "Executing task");
 
-        // 验证任务是否分配给了正确的 Agent
         if task.agent_id != agent.id {
             return Err(Error::AgentInvalidConfig(format!(
                 "Task is for agent {}, but current agent is {}",
@@ -141,7 +147,6 @@ impl AgentExecutor {
             )));
         }
 
-        // 检查 Agent 是否可以接受任务
         if !agent.can_accept_task() {
             return Err(Error::AgentExecution(format!(
                 "Agent {} is not available (state: {})",
@@ -149,7 +154,6 @@ impl AgentExecutor {
             )));
         }
 
-        // 更新 Agent 状态为 Busy
         agent.set_state(AgentState::Busy);
 
         let start_time = std::time::Instant::now();
@@ -164,21 +168,17 @@ impl AgentExecutor {
             new_checkpoint_id: None,
         };
 
-        // 使用 finally 模式确保状态回退
         let execution_result: Result<()> = async {
-            // 获取 LLM 提供者
             let model_profile = &agent.llm_config.model_profile;
             let provider = self.provider_registry.get_provider(model_profile)?;
 
-            // 获取可用工具（根据 Agent 的 ToolMask 过滤）
             let available_tools = self.get_available_tools_for_agent(agent).await?;
-            let chat_tools: Vec<crate::llm::ChatTool> = available_tools
+            let chat_tools: Vec<ChatTool> = available_tools
                 .iter()
                 .map(|(_, tool)| ChatMessage::tool_to_chat_tool(tool))
                 .collect();
 
-            // 构建消息列表
-            let messages = vec![
+            let mut messages: Vec<ChatMessage> = vec![
                 ChatMessage {
                     role: "system".to_string(),
                     content: Some(agent.system_prompt.clone()),
@@ -193,34 +193,118 @@ impl AgentExecutor {
                 },
             ];
 
-            // 调用 LLM
-            info!(
-                agent_id = %agent.id,
-                model_profile = %model_profile,
-                message_count = %messages.len(),
-                "Calling LLM"
-            );
+            let max_iterations = self.config.context_manager.max_tool_iterations;
+            let mut iteration = 0;
 
-            let llm_response = provider.chat_with_tools(messages, chat_tools).await?;
+            while iteration < max_iterations {
+                iteration += 1;
+                debug!(
+                    agent_id = %agent.id,
+                    iteration = %iteration,
+                    message_count = %messages.len(),
+                    "Calling LLM"
+                );
 
-            // 处理响应
-            result.success = true;
-            result.response = llm_response.text.unwrap_or_default();
+                let llm_response = provider.chat_with_tools(messages.clone(), chat_tools.clone()).await?;
 
-            // 注意：工具调用功能暂未完全实现，需要更复杂的消息历史管理
-            // 目前 tool_calls 保持为空
+                if llm_response.tool_calls.is_empty() {
+                    result.response = llm_response.text.unwrap_or_default();
+                    result.success = true;
+                    return Ok(());
+                }
 
-            Ok(())
+                info!(
+                    agent_id = %agent.id,
+                    tool_call_count = %llm_response.tool_calls.len(),
+                    "LLM returned tool calls"
+                );
+
+                let current_text = llm_response.text.clone();
+                let tool_calls = llm_response.tool_calls;
+                let this = self.clone();
+
+                let mut join_set = JoinSet::new();
+
+                for tool_call in tool_calls.clone() {
+                    let this = this.clone();
+                    join_set.spawn(async move {
+                        let exec_result = this.execute_tool(&tool_call, task.session_id).await;
+                        (tool_call, exec_result)
+                    });
+                }
+
+                let mut tool_results = Vec::new();
+                while let Some(res) = join_set.join_next().await {
+                    if let Ok((tool_call, result)) = res {
+                        tool_results.push((tool_call, result));
+                    }
+                }
+
+                tool_results.sort_by_key(|(tc, _)| tc.id.clone());
+
+                for (tool_call, exec_result) in tool_results {
+                    let (tool_result_content, is_error) = match &exec_result {
+                        Ok(r) => (r.text_content.clone(), r.is_error),
+                        Err(e) => (e.to_string(), true),
+                    };
+
+                    let tool_result = ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(tool_result_content.clone()),
+                        tool_calls: None,
+                        tool_call_id: Some(tool_call.id.clone()),
+                    };
+                    messages.push(tool_result);
+
+                    let record = crate::agent::types::ToolCallRecord {
+                        tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                        result: Some(serde_json::json!({ "content": tool_result_content })),
+                        success: !is_error,
+                        error: if is_error { exec_result.err().map(|e| e.to_string()) } else { None },
+                        execution_time_ms: 0,
+                    };
+                    result.tool_calls.push(record);
+                }
+
+                if let Some(text) = current_text {
+                    if !text.is_empty() {
+                        let assistant_msg = ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(text),
+                            tool_calls: Some(tool_calls.iter().map(|tc| {
+                                crate::llm::ChatToolCall {
+                                    id: tc.id.clone(),
+                                    r#type: "function".to_string(),
+                                    function: crate::llm::ChatToolCallFunction {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.to_string(),
+                                    },
+                                }
+                            }).collect()),
+                            tool_call_id: None,
+                        };
+                        messages.push(assistant_msg);
+                    }
+                }
+            }
+
+            Err(Error::MaxToolIterations {
+                message: format!(
+                    "Max tool iterations ({}) reached after {} tool calls. Context may need trimming.",
+                    max_iterations,
+                    result.tool_calls.len()
+                ),
+                tool_call_count: result.tool_calls.len(),
+            })
         }
         .await;
 
-        // 处理执行结果
         match execution_result {
             Ok(_) => {
                 info!(
                     agent_id = %agent.id,
                     success = %result.success,
-
                     "Task execution completed"
                 );
             }
@@ -235,13 +319,65 @@ impl AgentExecutor {
             }
         }
 
-        // 更新执行时间
         result.execution_time_ms = start_time.elapsed().as_millis() as u64;
 
-        // 更新 Agent 状态回 Idle
         agent.set_state(AgentState::Idle);
 
         Ok(result)
+    }
+
+    /// 执行单个工具调用
+    async fn execute_tool(&self, tool_call: &ToolCall, session_id: uuid::Uuid) -> Result<ExecutionResult> {
+        if self.local_tool_registry.has_tool(&tool_call.name) {
+            debug!(tool_name = %tool_call.name, "Executing as local tool");
+
+            let session = crate::models::Session {
+                id: session_id,
+                title: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                state: crate::models::SessionState::Active,
+                orchestrator_id: None,
+                current_checkpoint_id: None,
+                archived_at: None,
+                messages: Vec::new(),
+                metadata: std::collections::HashMap::new(),
+                lifecycle_events: Vec::new(),
+                agent_checkpoints: std::collections::HashMap::new(),
+            };
+
+            let context = ToolContext::new(session, Arc::clone(&self.config));
+
+            let result = self
+                .local_tool_registry
+                .call_tool(&tool_call.name, tool_call.arguments.clone(), context)
+                .await;
+
+            match result {
+                Ok(value) => {
+                    let text_content = serde_json::to_string(&value).unwrap_or_default();
+                    Ok(ExecutionResult {
+                        tool_name: tool_call.name.clone(),
+                        is_error: false,
+                        text_content,
+                        raw_content: vec![],
+                    })
+                }
+                Err(e) => Ok(ExecutionResult {
+                    tool_name: tool_call.name.clone(),
+                    is_error: true,
+                    text_content: e.to_string(),
+                    raw_content: vec![],
+                }),
+            }
+        } else {
+            debug!(tool_name = %tool_call.name, "Executing as MCP tool");
+
+            let mut manager = self.mcp_server_manager.lock().await;
+            self.tool_executor
+                .execute(&mut manager, &tool_call.name, tool_call.arguments.clone())
+                .await
+        }
     }
 
     /// 发送工单

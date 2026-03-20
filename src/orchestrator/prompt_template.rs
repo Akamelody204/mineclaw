@@ -15,15 +15,27 @@ impl PromptAssembler {
     /// # 参数
     /// - `base_prompt`: 基础系统提示词
     /// - `registry`: LLM 提供者注册表，用于获取可用模型信息
+    /// - `nested_depth`: 当前嵌套深度
+    /// - `max_nested_depth`: 最大允许嵌套深度
     ///
     /// # 返回
     /// 注入了模型信息的完整系统提示词
-    pub fn build_orchestrator_prompt(base_prompt: &str, registry: &LlmProviderRegistry) -> String {
+    pub fn build_orchestrator_prompt(
+        base_prompt: &str,
+        registry: &LlmProviderRegistry,
+        nested_depth: u8,
+        max_nested_depth: u8,
+    ) -> String {
         let model_info = Self::format_available_models(registry);
 
+        let depth_info = format!(
+            "\n\n## 嵌套深度信息\n\n当前嵌套深度: {} / 最大允许深度: {}",
+            nested_depth, max_nested_depth
+        );
+
         format!(
-            "{}\n\n---\n\n## 可用模型信息\n\n以下是当前可用的模型及其特性，你可以根据任务需求选择合适的模型：\n\n{}\n\n## 模型选择指南\n\n- 对于复杂的推理、规划或需要高精度的任务，优先使用 capability_tier 为 \"high\" 的模型\n- 对于简单的文本处理、摘要或快速响应，可以使用 capability_tier 为 \"low\" 或 \"medium\" 的模型以节省成本\n- 考虑任务的上下文大小，选择足够大的 context_window\n- 在 spawn_sub_agent 时，你可以通过 model_profile 参数指定使用哪个模型\n",
-            base_prompt, model_info
+            "{}{}\n\n---\n\n## 可用模型信息\n\n以下是当前可用的模型及其特性，你可以根据任务需求选择合适的模型：\n\n{}\n\n## 模型选择指南\n\n- 对于复杂的推理、规划或需要高精度的任务，优先使用 capability_tier 为 \"high\" 的模型\n- 对于简单的文本处理、摘要或快速响应，可以使用 capability_tier 为 \"low\" 或 \"medium\" 的模型以节省成本\n- 考虑任务的上下文大小，选择足够大的 context_window\n- 在 spawn_sub_agent 时，你可以通过 model_profile 参数指定使用哪个模型\n",
+            base_prompt, depth_info, model_info
         )
     }
 

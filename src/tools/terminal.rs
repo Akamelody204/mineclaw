@@ -217,15 +217,6 @@ impl RunCommandTool {
         None
     }
 
-    fn is_command_always_allowed(&self, command: &str, context: &ToolContext) -> bool {
-        for re in &context.config.local_tools.terminal.compiled_always_allow {
-            if re.is_match(command) {
-                return true;
-            }
-        }
-        false
-    }
-
     fn tokenize_commands(&self, full_command: &str) -> Vec<String> {
         let mut commands = Vec::new();
         let mut current = String::new();
@@ -367,12 +358,18 @@ impl RunCommandTool {
     }
 
     fn apply_output_filters(&self, command: &str, output: &str, context: &ToolContext) -> String {
-        if let Some(filters) = context.config.local_tools.terminal.filters.get(command) {
+        if let Some(filter) = context.config.local_tools.terminal.filters.get(command) {
             let lines: Vec<&str> = output.lines().collect();
-            let filtered_lines: Vec<&str> = lines
-                .into_iter()
-                .filter(|line| filters.iter().any(|filter| line.contains(filter)))
-                .collect();
+            let filtered_lines: Vec<&str> = match filter {
+                crate::config::TerminalOutputFilter::Ignore(patterns) => lines
+                    .into_iter()
+                    .filter(|line| !patterns.iter().any(|pattern| line.contains(pattern)))
+                    .collect(),
+                crate::config::TerminalOutputFilter::Keep(patterns) => lines
+                    .into_iter()
+                    .filter(|line| patterns.iter().any(|pattern| line.contains(pattern)))
+                    .collect(),
+            };
             return filtered_lines.join("\n");
         }
         output.to_string()
@@ -864,9 +861,6 @@ impl crate::tools::LocalTool for RunCommandTool {
 
         let sub_commands = self.tokenize_commands(&full_command);
         for cmd in &sub_commands {
-            if self.is_command_always_allowed(cmd, &context) {
-                continue;
-            }
             if let Some(reason) = self.is_command_blacklisted(cmd, &context) {
                 return Err(crate::error::Error::LocalToolExecution {
                     tool: "run_command".to_string(),

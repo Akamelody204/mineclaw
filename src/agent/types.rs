@@ -370,6 +370,8 @@ pub struct AgentConfig {
     pub parent_orchestrator_id: Option<AgentId>,
     /// 工具掩码
     pub tool_mask: Option<crate::tool_mask::types::ToolMask>,
+    /// 文件系统访问范围
+    pub filesystem_scope: Option<crate::config::FilesystemAccessScope>,
 }
 
 impl AgentConfig {
@@ -389,6 +391,7 @@ impl AgentConfig {
             nested_depth: None,
             parent_orchestrator_id: None,
             tool_mask: None,
+            filesystem_scope: None,
         }
     }
 

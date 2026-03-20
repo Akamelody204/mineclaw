@@ -101,6 +101,9 @@ pub enum Error {
     #[error("Agent execution error: {0}")]
     AgentExecution(String),
 
+    #[error("Max tool iterations reached: {message}")]
+    MaxToolIterations { message: String, tool_call_count: usize },
+
     #[error("Work order error: {0}")]
     WorkOrder(String),
 
@@ -149,6 +152,7 @@ impl Error {
             Error::AgentNotFound(_) => "AGENT_NOT_FOUND",
             Error::AgentInvalidConfig(_) => "AGENT_INVALID_CONFIG",
             Error::AgentExecution(_) => "AGENT_EXECUTION_ERROR",
+            Error::MaxToolIterations { .. } => "MAX_TOOL_ITERATIONS",
             Error::WorkOrder(_) => "WORK_ORDER_ERROR",
             Error::ToolMaskNotFound(_) => "TOOL_MASK_NOT_FOUND",
             Error::ModelProfileNotFound(_) => "MODEL_PROFILE_NOT_FOUND",
@@ -221,6 +225,7 @@ impl axum::response::IntoResponse for Error {
             Error::AgentNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::AgentInvalidConfig(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::AgentExecution(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Error::MaxToolIterations { .. } => axum::http::StatusCode::BAD_REQUEST,
             Error::WorkOrder(_) => axum::http::StatusCode::BAD_REQUEST,
             Error::ToolMaskNotFound(_) => axum::http::StatusCode::NOT_FOUND,
             Error::ModelProfileNotFound(_) => axum::http::StatusCode::NOT_FOUND,

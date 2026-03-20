@@ -126,7 +126,11 @@ pub struct CheckpointBuilder {
 }
 
 impl Checkpoint {
-    pub fn builder(session_id: Uuid, agent_id: AgentId, affected_files: Vec<FileInfo>) -> CheckpointBuilder {
+    pub fn builder(
+        session_id: Uuid,
+        agent_id: AgentId,
+        affected_files: Vec<FileInfo>,
+    ) -> CheckpointBuilder {
         CheckpointBuilder {
             session_id,
             agent_id,

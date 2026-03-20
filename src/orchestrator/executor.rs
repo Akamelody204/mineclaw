@@ -3,7 +3,7 @@
 //! 提供总控的创建、Agent 管理、任务分配和工单处理等核心功能。
 
 use chrono::Utc;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::agent::work_order::{WorkOrder, WorkOrderRecipient, WorkOrderType};
@@ -87,6 +87,8 @@ impl OrchestratorExecutor {
         config.agent_config.system_prompt = PromptAssembler::build_orchestrator_prompt(
             &config.agent_config.system_prompt,
             &self.provider_registry,
+            config.nested_depth,
+            self.config.orchestrator.max_nested_depth,
         );
 
         // 创建 AgentExecutor 实例
@@ -134,12 +136,19 @@ impl OrchestratorExecutor {
             "Creating new agent via orchestrator"
         );
 
-        // 如果创建的是子总控，自动设置 nested_depth
+        // 如果创建的是子总控，自动设置 nested_depth 并检查限制
         if matches!(
             agent_config.role,
             AgentRole::MasterOrchestrator | AgentRole::SubOrchestrator
         ) {
-            agent_config = agent_config.with_nested_depth(orchestrator.nested_depth + 1);
+            let new_depth = orchestrator.nested_depth + 1;
+            if new_depth > self.config.orchestrator.max_nested_depth {
+                return Err(Error::InvalidConfig(format!(
+                    "Cannot create nested orchestrator: depth {} exceeds max_nested_depth {}",
+                    new_depth, self.config.orchestrator.max_nested_depth
+                )));
+            }
+            agent_config = agent_config.with_nested_depth(new_depth);
             agent_config = agent_config
                 .with_parent_orchestrator(AgentId::from_uuid(*orchestrator.id.as_uuid()));
         }
@@ -270,8 +279,63 @@ impl OrchestratorExecutor {
             self.config.clone(),
         );
 
+        let task_session_id = task.session_id;
+
         // 执行任务
-        let result = agent_executor.execute_task(agent, task, provider).await?;
+        let result = agent_executor.execute_task(agent, task, provider).await;
+
+        if let Err(Error::MaxToolIterations { message, tool_call_count }) = &result {
+            error!(
+                orchestrator_id = %orchestrator.id,
+                agent_id = %agent_id,
+                tool_call_count = %tool_call_count,
+                "Max tool iterations reached, constructing CMA notification"
+            );
+
+            let notification = CmaNotification::new(
+                CmaNotificationType::RollbackAndHandover,
+                orchestrator.session_id.unwrap_or_else(Uuid::new_v4),
+                orchestrator.id,
+                format!(
+                    "Max tool iterations ({}) reached. {} tool calls executed. {}",
+                    self.config.context_manager.max_tool_iterations,
+                    tool_call_count,
+                    message
+                ),
+            );
+
+            let (new_orch, forwarded) = Self::handle_cma_notification(
+                orchestrator.clone(),
+                notification,
+                None,
+            )?;
+
+            if let Some(_fwd) = forwarded {
+                warn!(
+                    orchestrator_id = %new_orch.id,
+                    "CMA notification forwarded to parent"
+                );
+            }
+
+            *orchestrator = new_orch;
+        }
+
+        let result = result.unwrap_or_else(|e| {
+            if matches!(e, Error::MaxToolIterations { .. }) {
+                AgentTaskResult {
+                    success: false,
+                    agent_id: *agent_id,
+                    session_id: task_session_id,
+                    response: "Max tool iterations reached, CMA notified for context trimming".to_string(),
+                    tool_calls: Vec::new(),
+                    error: None,
+                    execution_time_ms: 0,
+                    new_checkpoint_id: None,
+                }
+            } else {
+                panic!("Unexpected error: {:?}", e);
+            }
+        });
 
         info!(
             orchestrator_id = %orchestrator.id,
@@ -427,18 +491,44 @@ impl OrchestratorExecutor {
     /// * `task_manager` - 任务管理器（可选，用于取消相关任务）
     ///
     /// # 返回
-    /// 返回更新后的总控或错误
+    /// 返回更新后的总控和需要转发给父总控的通知（如果有）
     pub fn handle_cma_notification(
         mut orchestrator: Orchestrator,
         notification: CmaNotification,
         task_manager: Option<&SharedTaskManager>,
-    ) -> Result<Orchestrator> {
+    ) -> Result<(Orchestrator, Option<CmaNotification>)> {
         debug!(
             orchestrator_id = %orchestrator.id,
+            target_orchestrator_id = %notification.target_orchestrator_id,
             notification_type = ?notification.notification_type,
             session_id = %notification.session_id,
             "Handling CMA notification"
         );
+
+        if notification.target_orchestrator_id != orchestrator.id {
+            if let Some(parent_id) = orchestrator.parent_orchestrator_id {
+                info!(
+                    orchestrator_id = %orchestrator.id,
+                    target_orchestrator_id = %notification.target_orchestrator_id,
+                    parent_orchestrator_id = %parent_id,
+                    "CMA notification not for this orchestrator, forwarding to parent"
+                );
+                let forwarded_notification = CmaNotification::new(
+                    notification.notification_type,
+                    notification.session_id,
+                    parent_id,
+                    notification.reason,
+                );
+                return Ok((orchestrator, Some(forwarded_notification)));
+            } else {
+                info!(
+                    orchestrator_id = %orchestrator.id,
+                    target_orchestrator_id = %notification.target_orchestrator_id,
+                    "CMA notification not for this orchestrator, no parent to forward to"
+                );
+                return Ok((orchestrator, None));
+            }
+        }
 
         match notification.notification_type {
             CmaNotificationType::RollbackAndHandover => {
@@ -449,22 +539,13 @@ impl OrchestratorExecutor {
                     "Processing RollbackAndHandover notification"
                 );
 
-                // 如果有 TaskManager，取消该 Session 相关的所有任务
                 if let Some(_tm) = task_manager {
-                    // 注意：这里需要根据 session_id 找到相关任务，
-                    // 目前 TaskManager 没有按 session_id 索引，
-                    // 将来可以扩展 TaskManager 来支持这个功能
                     info!(
                         orchestrator_id = %orchestrator.id,
                         "TaskManager available, but session-based task cancellation not implemented yet"
                     );
                 }
 
-                // TODO: 完整实现需要：
-                // 1. 回退到指定的 Checkpoint
-                // 2. 恢复 Session 状态
-                // 3. 创建新的 Agent 进行转交
-                // 4. 传递必要的上下文给新 Agent
                 info!(
                     orchestrator_id = %orchestrator.id,
                     "RollbackAndHandover placeholder - full implementation pending"
@@ -477,10 +558,6 @@ impl OrchestratorExecutor {
                     "Processing ContextTrimmed notification"
                 );
 
-                // TODO: 完整实现需要：
-                // 1. 记录上下文已裁剪
-                // 2. 可能需要更新 Session 元数据
-                // 3. 考虑是否需要重新评估路由策略
                 info!(
                     orchestrator_id = %orchestrator.id,
                     "ContextTrimmed placeholder - full implementation pending"
@@ -495,7 +572,7 @@ impl OrchestratorExecutor {
             "CMA notification handled successfully"
         );
 
-        Ok(orchestrator)
+        Ok((orchestrator, None))
     }
 
     /// 关联会话
@@ -652,13 +729,30 @@ impl OrchestrationInterface for OrchestratorProvider {
         };
 
         // 构造配置
-        let agent_config = AgentConfig::new(
+        let mut agent_config = AgentConfig::new(
             name.to_string(),
             agent_role,
             llm_config,
             format!("You are a specialized agent. Capability: {}", capability),
         )
         .with_capability(capability.to_string());
+
+        // 如果创建的是子总控，检查嵌套深度限制
+        if matches!(
+            agent_config.role,
+            AgentRole::MasterOrchestrator | AgentRole::SubOrchestrator
+        ) {
+            let new_depth = orch.nested_depth + 1;
+            if new_depth > self.config.orchestrator.max_nested_depth {
+                return Err(Error::InvalidConfig(format!(
+                    "Cannot create nested orchestrator: depth {} exceeds max_nested_depth {}",
+                    new_depth, self.config.orchestrator.max_nested_depth
+                )));
+            }
+            agent_config = agent_config.with_nested_depth(new_depth);
+            agent_config =
+                agent_config.with_parent_orchestrator(AgentId::from_uuid(*orch.id.as_uuid()));
+        }
 
         // 执行创建逻辑
         // 因为 OrchestratorExecutor::create_agent 消费 Orchestrator，

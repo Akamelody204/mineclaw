@@ -197,10 +197,15 @@ impl ToolCoordinator {
 
                         let result = this.execute_tool(tool_call.clone(), &session).await;
 
-                        callback.on_tool_result(
-                            result.as_ref().map(|r| r.text_content.as_str()).unwrap_or(""),
-                            result.as_ref().map(|r| r.is_error).unwrap_or(true)
-                        ).await;
+                        callback
+                            .on_tool_result(
+                                result
+                                    .as_ref()
+                                    .map(|r| r.text_content.as_str())
+                                    .unwrap_or(""),
+                                result.as_ref().map(|r| r.is_error).unwrap_or(true),
+                            )
+                            .await;
 
                         (tool_call, result)
                     });

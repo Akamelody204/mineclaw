@@ -119,8 +119,12 @@ async fn main() -> mineclaw::Result<()> {
     info!("Initializing TaskManager and ContextManagerAgent...");
     let task_manager = Arc::new(tokio::sync::Mutex::new(TaskManager::new()));
     let context_store = ContextStore::new();
-    // 默认最大上下文设置为 100,000 tokens
-    let context_manager = Arc::new(ContextManagerAgent::new(context_store, 100000));
+    let context_manager = Arc::new(ContextManagerAgent::with_config(
+        context_store,
+        config.context_manager.max_tokens,
+        config.context_manager.trim_hint.clone(),
+        config.context_manager.threshold,
+    ));
     let orchestrator_executor = Arc::new(OrchestratorExecutor::new(
         provider_registry.clone(),
         mcp_server_manager_arc.clone(),

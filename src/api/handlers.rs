@@ -347,7 +347,7 @@ pub async fn debug_config(State(state): State<AppState>) -> Result<Json<DebugCon
         llm_provider: config.llm.provider.clone(),
         llm_model: config.llm.model.clone(),
         llm_base_url: config.llm.base_url.clone(),
-        terminal_enabled: config.local_tools.terminal.enabled,
+        terminal_enabled: true,
         terminal_timeout_seconds: config.local_tools.terminal.timeout_seconds,
         terminal_max_output_bytes: config.local_tools.terminal.max_output_bytes,
         terminal_max_concurrent: config.local_tools.terminal.max_concurrent_processes,

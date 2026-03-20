@@ -1,10 +1,16 @@
 use crate::encryption::EncryptionManager;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{info, warn};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TerminalOutputFilter {
+    Ignore(Vec<String>),
+    Keep(Vec<String>),
+}
 
 /// Checkpoint 配置
 #[derive(Debug, Deserialize, Clone)]
@@ -37,9 +43,6 @@ impl Default for CheckpointConfig {
 /// 终端工具配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct TerminalConfig {
-    /// 是否启用终端工具
-    #[serde(default = "default_terminal_enabled")]
-    pub enabled: bool,
     /// 最大输出字节数
     #[serde(default = "default_terminal_max_output_bytes")]
     pub max_output_bytes: usize,
@@ -58,12 +61,6 @@ pub struct TerminalConfig {
     /// 命令正则表达式黑名单
     #[serde(default)]
     pub command_blacklist_regex: Vec<String>,
-    /// 始终允许的命令正则表达式
-    #[serde(default)]
-    pub always_allow_regex: Vec<String>,
-    /// 需要确认的命令正则表达式
-    #[serde(default)]
-    pub always_confirm_regex: Vec<String>,
     /// 后台任务存活时间 (分钟) (Phase EX3)
     #[serde(default = "default_background_task_ttl_minutes")]
     pub background_task_ttl_minutes: u64,
@@ -71,19 +68,9 @@ pub struct TerminalConfig {
     /// 编译后的黑名单正则
     #[serde(skip)]
     pub compiled_blacklist: Vec<Regex>,
-    /// 编译后的始终允许正则
-    #[serde(skip)]
-    pub compiled_always_allow: Vec<Regex>,
-    /// 编译后的始终确认正则
-    #[serde(skip)]
-    pub compiled_always_confirm: Vec<Regex>,
-    /// 过滤规则
+    /// 过滤规则（命令名 -> 过滤器）
     #[serde(default)]
-    pub filters: HashMap<String, Vec<String>>,
-}
-
-fn default_terminal_enabled() -> bool {
-    true
+    pub filters: HashMap<String, TerminalOutputFilter>,
 }
 
 fn default_terminal_max_output_bytes() -> usize {
@@ -105,19 +92,14 @@ fn default_terminal_max_concurrent_processes() -> usize {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            enabled: default_terminal_enabled(),
             max_output_bytes: default_terminal_max_output_bytes(),
             timeout_seconds: default_terminal_timeout_seconds(),
             max_concurrent_processes: default_terminal_max_concurrent_processes(),
             allowed_workspaces: Vec::new(),
             command_blacklist: Vec::new(),
             command_blacklist_regex: Vec::new(),
-            always_allow_regex: Vec::new(),
-            always_confirm_regex: Vec::new(),
             background_task_ttl_minutes: default_background_task_ttl_minutes(),
             compiled_blacklist: Vec::new(),
-            compiled_always_allow: Vec::new(),
-            compiled_always_confirm: Vec::new(),
             filters: HashMap::new(),
         }
     }
@@ -152,6 +134,12 @@ pub struct Config {
     /// 默认模型档案名称，"default" 特指 Config.llm 段
     #[serde(default = "default_default_model")]
     pub default_model: String,
+    /// 总控配置
+    #[serde(default)]
+    pub orchestrator: OrchestratorSettings,
+    /// 上下文管理器配置
+    #[serde(default)]
+    pub context_manager: ContextManagerSettings,
 }
 
 fn default_agentfs_db_path() -> String {
@@ -265,6 +253,64 @@ pub struct FilesystemConfig {
     pub allowed_directories: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilesystemAccessScope {
+    pub allowed_paths: Vec<PathBuf>,
+    pub readonly_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrchestratorSettings {
+    pub max_nested_depth: u8,
+}
+
+impl Default for OrchestratorSettings {
+    fn default() -> Self {
+        Self {
+            max_nested_depth: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextManagerSettings {
+    #[serde(default = "default_context_manager_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "default_context_manager_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_context_manager_trim_hint")]
+    pub trim_hint: String,
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: usize,
+}
+
+fn default_max_tool_iterations() -> usize {
+    50
+}
+
+fn default_context_manager_max_tokens() -> usize {
+    100000
+}
+
+fn default_context_manager_threshold() -> f64 {
+    0.6
+}
+
+fn default_context_manager_trim_hint() -> String {
+    "注意：之前的对话上下文已被 CMA 裁剪以保持注意力专注".to_string()
+}
+
+impl Default for ContextManagerSettings {
+    fn default() -> Self {
+        Self {
+            max_tokens: default_context_manager_max_tokens(),
+            threshold: default_context_manager_threshold(),
+            trim_hint: default_context_manager_trim_hint(),
+            max_tool_iterations: default_max_tool_iterations(),
+        }
+    }
+}
+
 fn default_max_read_bytes() -> usize {
     16384
 }
@@ -301,6 +347,8 @@ impl Default for Config {
             encryption: None,
             models: HashMap::new(),
             default_model: default_default_model(),
+            orchestrator: OrchestratorSettings::default(),
+            context_manager: ContextManagerSettings::default(),
         }
     }
 }
@@ -330,11 +378,6 @@ impl Config {
             .set_default("llm.temperature", default_config.llm.temperature)
             .map_err(crate::error::Error::Config)?
             .set_default("agentfs_db_path", default_config.agentfs_db_path)
-            .map_err(crate::error::Error::Config)?
-            .set_default(
-                "local_tools.terminal.enabled",
-                default_config.local_tools.terminal.enabled,
-            )
             .map_err(crate::error::Error::Config)?
             .set_default(
                 "local_tools.terminal.max_output_bytes",
@@ -451,34 +494,6 @@ impl Config {
             }
         }
         config.local_tools.terminal.compiled_blacklist = compiled_blacklist;
-
-        let mut compiled_always_allow = Vec::new();
-        for regex_str in &config.local_tools.terminal.always_allow_regex {
-            match Regex::new(regex_str) {
-                Ok(re) => compiled_always_allow.push(re),
-                Err(e) => {
-                    warn!(
-                        "Failed to compile always_allow regex '{}': {}",
-                        regex_str, e
-                    );
-                }
-            }
-        }
-        config.local_tools.terminal.compiled_always_allow = compiled_always_allow;
-
-        let mut compiled_always_confirm = Vec::new();
-        for regex_str in &config.local_tools.terminal.always_confirm_regex {
-            match Regex::new(regex_str) {
-                Ok(re) => compiled_always_confirm.push(re),
-                Err(e) => {
-                    warn!(
-                        "Failed to compile always_confirm regex '{}': {}",
-                        regex_str, e
-                    );
-                }
-            }
-        }
-        config.local_tools.terminal.compiled_always_confirm = compiled_always_confirm;
 
         Ok(config)
     }

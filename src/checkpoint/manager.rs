@@ -576,6 +576,7 @@ impl CheckpointManager {
     }
 
     /// 保存会话快照
+    #[allow(unused)]
     async fn save_session_snapshot(&self, checkpoint_id: &str, session: &Session) -> Result<()> {
         let key = self.session_snapshot_key(checkpoint_id);
         let data = serde_json::to_vec(session)?;

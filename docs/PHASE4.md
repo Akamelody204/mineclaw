@@ -142,18 +142,34 @@
 
 **只有两个触发点**：
 
-**触发点 1：普通 Agent 主动求助（Worker → CMA）**
+**触发点 1：普通 Agent 主动求助（Worker → Master）**
 - 普通 Agent 发现自己持续犯错 → 生成"求助工单"
-- 求助工单直接发送给 CMA（不是主总控！）
-- CMA 分析后决定回退和转交，通知总控执行
+- 求助工单直接发送给 Master Agent（不通过 CMA！）
+- Master 分析后决定如何处理（回退、换人、或其他）
 
 **触发点 2：上下文满载（唯一的自动触发点）**
 - 检测到：当前上下文长度 ≥ 阈值（如 90%）
 - 自动触发：CMA 进行清理
-- 清理后判断：是否在持续犯错？
-  - 是 → 触发回退 + 转交
-  - 否 → 继续执行
-- 其他情况不自动触发，因为每次输入的上下文通常很长
+- CMA 判断：
+  - **可以解决** → CMA 直接回退到 Checkpoint + 总结错误注入上下文 + 让 Agent 继续（自我纠正）
+  - **无法解决** → CMA 代为发送求助工单给 Master
+- 其他情况不自动触发
+
+### 6.1 CMA 回退行为（核心设计）
+
+**CMA 的回退是针对单个 Agent 的，不是全局回退**：
+- Agent 是无状态执行者，文件修改不共享（每个 Agent 只操作分配给自己的文件）
+- 因此回退时文件修改可以一并回退
+
+**CMA 回退流程**：
+1. 回退到犯错前的 Checkpoint（包括文件和上下文）
+2. 总结错误并注入到上下文中
+3. 让 Agent 继续执行（自我纠正）
+
+**为什么让原 Agent 继续？**
+- 换新 Agent 需要重新理解上下文，成本高
+- 如果只是"一时糊涂"，让原 Agent 继续更高效
+- 只有问题无法解决时才真正换人
 
 ### 7. 文件并发：避免冲突
 
@@ -378,7 +394,7 @@
 - [x] 实现结果回收功能
 - [x] 实现工单生成和处理（统一工单结构）
 - [x] 实现 Session 与 Agent 的关联
-- [x] 实现 CMA 通知处理（回退和转交）
+- [x] ~~实现 CMA 通知处理（回退和转交）~~（已移除，CMA 直接执行）
 - [x] 编写单元测试
 - [x] 验证验收清单
 
@@ -429,19 +445,12 @@
 
 （WorkOrder 统一定义见 Phase 4.1）
 
+#### 说明：CmaNotification 已移除
 
-
-**CmaNotification（CMA 通知）**
-- notification_type: CmaNotificationType
-- session_id: SessionId
-- target_orchestrator_id: OrchestratorId
-- checkpoint_id: Option<CheckpointId>
-- reason: String
-- created_at: DateTime<Utc>
-
-**CmaNotificationType**
-- RollbackAndHandover: 回退并转交
-- ContextTrimmed: 上下文已裁剪
+原设计中的 `CmaNotification` 和 `CmaNotificationType` 数据结构已移除：
+- RollbackAndHandover → CMA 直接执行回退，不再需要通知
+- ContextTrimmed → CMA 直接完成裁剪，不再需要通知
+- CMA 无法解决时直接发送 WorkOrder 给 Master
 
 #### API 设计
 
@@ -514,19 +523,21 @@
 - 创建工单
 - 序列化为 JSON 字符串，作为 User Message
 
-**总控处理 CMA 通知**
-- 输入：mut Orchestrator, CmaNotification
-- 输出：Result<Orchestrator, Error>
-- 如果是 RollbackAndHandover：
-  - 回退到指定 Checkpoint
-  - 创建新 Agent 进行转交
-- 如果是 ContextTrimmed：
-  - 记录上下文已裁剪
-  - 继续执行
+**总控接收和处理工单**
+- Agent 求助工单直接发给 Master
+- Master 分析后决定如何处理
 
 **总控关联 Session**
 - 输入：mut Orchestrator, SessionId
 - 输出：Orchestrator
+
+#### 说明：CmaNotification 已移除
+
+原设计的 `CmaNotification` 和 `CmaNotificationType` 已移除，原因：
+
+- CMA 的回退动作不需要通知 Orchestrator，由 CMA 直接执行
+- CMA 无法解决时直接发送 WorkOrder (HelpRequest) 给 Master，不需要单独的"通知"机制
+- 简化架构：只有 WorkOrder 一种消息传递机制
 
 #### 测试策略
 - 单元测试：总控 CRUD 操作
@@ -551,7 +562,7 @@
 - [x] 总控可以等待任务完成
 - [x] TaskManager 支持取消任务（基础设施预留，供 Phase 7-8 API 使用）
 - [x] 总控可以生成工单
-- [x] 总控可以处理 CMA 通知
+- [x] 总控可以接收和处理 WorkOrder（替代原有的 CMA 通知）
 - [x] 多个并行任务正常工作
 - [x] 所有单元测试通过
 - [x] 集成测试通过
@@ -858,12 +869,11 @@
 - [x] 定义 ContextChunk 结构
 - [x] 定义 ContextMetadata 结构
 - [x] 定义 ContextStore 结构
-- [x] 实现 Agent 求助接收机制（触发点 1）
 - [x] 实现上下文长度监控（触发点 2，唯一自动触发点）
 - [x] 实现上下文清理（裁剪）
 - [x] 实现持续犯错判断
-- [x] 实现回退到指定 Checkpoint (由 CMA 建议并触发通知)
-- [x] 实现触发总控转交 (通过 CmaNotification)
+- [x] 实现 CMA 直接回退（回退到 Checkpoint + 注入错误总结 + 让 Agent 继续）
+- [x] 实现 CMA 代为发送求助工单（当问题无法解决时发给 Master）
 - [x] 定义上下文裁剪策略模板
 - [x] 实现 ContextManagerAgent（作为服务型 Agent）
 - [x] 编写单元测试
@@ -908,35 +918,43 @@
 
 **TrimmingTrigger**
 - 触发裁剪的条件
-- max_token_count: usize（最大 token 数，默认 90%）
+- max_token_count: usize（最大 token 数）
 
-**TrimmingStrategy**
-- 裁剪策略
-- strategy_type: TrimmingStrategyType（Fifo, ImportanceBased, Hybrid）
-- keep_recent_n_chunks: Option<usize>（保留最近 N 个块）
-- keep_important_chunks: bool（是否保留重要块）
-- min_chunks_to_keep: usize（最少保留块数）
+**ContextChunk**
+- id: ContextId
+- session_id: SessionId
+- content: String
+- chunk_type: ContextChunkType（Message, ToolCall, ToolResult, System）
+- token_count: usize
+- created_at: DateTime<Utc>
+- metadata: HashMap<String, String>
+- is_important: bool（是否重要，裁剪时优先保留）
+- retention_priority: u8（保留优先级，0-10，越高越优先保留）
 
-**TrimmingStrategyType**
-- Fifo: 先进先出，删除最早的
-- ImportanceBased: 基于重要性，删除最不重要的
-- Hybrid: 混合策略，结合时间和重要性
+**ContextChunkType**
+- 枚举类型
+- 值：UserMessage, AssistantMessage, ToolCall, ToolResult, SystemPrompt, SystemNotification, WorkOrder, HelpRequest
+
+**ContextMetadata**
+- session_id: SessionId
+- total_token_count: usize
+- chunk_count: usize
+- first_message_at: DateTime<Utc>
+- last_message_at: DateTime<Utc>
+- estimated_cost: f64（可选，预估的 token 成本）
+
+**ContextStore**
+- 存储上下文块
+- 支持按 Session 查询
+- 支持按时间范围查询
+- 支持按重要性过滤
+- 线程安全
 
 **WorkOrder**
 - 工单格式（作为 User Message）
 - completed_work: String（已完成部分详细标注）
 - related_files: Vec<String>（相关文件的相对路径列表）
 - next_stage_plan: String（下一阶段的详细计划）
-
-**StrategyTemplate**
-- 模板 ID
-- 模板名称
-- 模板类型（Trimming）
-- 模板内容（JSON 或 YAML）
-- 版本号
-- 创建时间
-- 更新时间
-- 是否为默认模板
 
 #### API 设计
 
@@ -954,10 +972,10 @@
 - 输入：SessionId
 - 输出：Result<(Vec<ContextChunk>, ContextMetadata), Error>
 
-**获取裁剪后的上下文**
-- 输入：SessionId, TrimmingStrategy
+**获取 Session 的上下文**
+- 输入：SessionId
 - 输出：Result<Vec<ContextChunk>, Error>
-- 应用裁剪策略，返回裁剪后的上下文
+- 返回会话的上下文块列表
 
 **检查是否需要裁剪（触发点 2）**
 - 输入：SessionId, TrimmingTrigger
@@ -965,18 +983,19 @@
 - 返回 true 表示需要裁剪
 - 这是唯一的自动触发点
 
-+**接收工单（触发点 1：Agent 发送求助工单）**
-+- 输入：WorkOrder（recipient = ContextManager, type = HelpRequest）
-+- 输出：Result<(), Error>
-+- 记录工单
-+- 分析情况
-+- 决定回退到哪个 Checkpoint
-+- 触发总控转交
+**接收工单（触发点 1：Agent 发送求助工单）**
+- 输入：WorkOrder（recipient = ContextManager, type = HelpRequest）
+- 输出：Result<(), Error>
+- 记录工单
+- 分析情况
+- 决定回退到哪个 Checkpoint
+- 触发总控转交
 
 **执行裁剪**
-- 输入：SessionId, TrimmingStrategy
+- 输入：SessionId
 - 输出：Result<usize, Error>（裁剪的块数）
-- 从存储中移除被裁剪的块（或标记为已裁剪）
+- 从存储中移除被裁剪的块
+- 优先保留重要块
 - 创建 Checkpoint 保存裁剪前的状态
 
 **标记上下文块为重要**
@@ -992,55 +1011,44 @@
 - 输出：Result<String, Error>
 - 序列化为 JSON 字符串，作为 User Message
 
-**保存策略模板**
-- 输入：StrategyTemplate
-- 输出：Result<(), Error>
+**ContextManagerAgent 特殊功能（核心设计）**
 
-**获取策略模板**
-- 输入：模板 ID
-- 输出：Result<StrategyTemplate, Error>
+**触发点 1（Agent 主动求助）已移除**：求助工单直接发给 Master，不通过 CMA
 
-**列出所有策略模板**
-- 输入：可选模板类型过滤
-- 输出：Result<Vec<StrategyTemplate>, Error>
+**触发点 2（上下文满载）**：
+- CMA 监控 Session 上下文大小
+- 上下文满载时，CMA 自动执行裁剪
+- CMA 判断问题是否可解决：
+  - **可解决**：CMA 直接执行回退 + 注入错误总结 + 让 Agent 继续
+  - **不可解决**：CMA 代为发送 WorkOrder (HelpRequest) 给 Master
 
-**设置默认模板**
-- 输入：模板 ID
-- 输出：Result<(), Error>
-
-**ContextManagerAgent 特殊功能**
-- 监听 Agent 求助（触发点 1）
-- 监控 Session 上下文大小（触发点 2，唯一自动触发）
-- 收到求助时：分析、决定回退 Checkpoint、通知总控
-- 上下文满载时：清理、判断持续犯错、决定是否回退+转交
-- 其他情况不自动触发
+**CMA 回退流程**：
+1. 回退到犯错前的 Checkpoint（包括文件和上下文）
+2. 总结错误并注入到上下文中
+3. 让 Agent 继续执行
 
 #### 测试策略
 - 单元测试：上下文存储和检索
-- 单元测试：裁剪策略
+- 单元测试：上下文裁剪
 - 单元测试：持续犯错检测
-- 单元测试：工单接收和处理（来自 Agent 的求助）
-- 单元测试：工单生成
-- 集成测试：ContextManagerAgent 端到端流程（两种触发机制）
+- 单元测试：CMA 直接回退（文件+上下文）
+- 单元测试：CMA 代发求助工单
+- 集成测试：ContextManagerAgent 端到端流程（回退 + 自我纠正）
 
 #### 验收标准
 - [x] 可以存储上下文块
 - [x] 可以获取完整上下文
 - [x] 可以正确计算 token 数 (简易估算实现)
 - [x] 可以检查是否需要裁剪（唯一自动触发点）
-- [x] 可以接收 Agent 的求助工单（recipient = ContextManager）
-- [x] FIFO 裁剪策略正常工作
-- [x] 基于重要性的裁剪策略正常工作
-- [x] 混合裁剪策略正常工作
+- [x] ~~可以接收 Agent 的求助工单~~（已移除，求助直接发给 Master）
+- [x] 上下文裁剪正常工作（优先保留重要块）
 - [x] 重要块被优先保留
 - [x] 可以标记块为重要
 - [x] 持续犯错检测正常工作
-- [x] 可以决定回退到哪个 Checkpoint (通过工单建议)
-- [x] 收到求助工单后可以通知总控进行转交
+- [x] CMA 可以直接执行回退（包括文件恢复和上下文注入）
+- [x] CMA 可以代为发送求助工单给 Master（当问题无法解决时）
 - [x] 可以从消息/工单创建上下文块
-- [x] 策略模板可以保存和读取 (基础实现已完成，完整模板化待后续增强)
-- [x] 可以设置默认模板/策略
-- [x] ContextManagerAgent 只在两种情况下触发
+- [x] ContextManagerAgent 只在上下文满载时自动触发
 - [x] ContextManagerAgent 可以监控上下文
 - [x] ContextManagerAgent 可以自动触发裁剪
 - [x] 所有单元测试通过

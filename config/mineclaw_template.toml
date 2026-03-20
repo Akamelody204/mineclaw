@@ -24,6 +24,15 @@ allowed_directories = [
 # 是否启用 checkpoint（默认 true）
 enabled = true
 
+# 上下文管理器配置
+[context_manager]
+# 最大上下文 token 数（默认 100000）
+max_tokens = 100000
+# 触发裁剪的阈值（默认 0.6，即 60%）
+threshold = 0.6
+# 裁剪后注入的提示词
+trim_hint = "注意：之前的对话上下文已被 CMA 裁剪以保持注意力专注"
+
 # 数据存储配置
 [data]
 # 数据存储根目录
