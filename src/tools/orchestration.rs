@@ -26,13 +26,6 @@ pub trait OrchestrationInterface: Send + Sync + Debug {
         next_stage_plan: &str,
     ) -> Result<Value>;
 
-    /// 提交求助工单（触发 CMA 干预）
-    async fn submit_help_work_order(
-        &self,
-        problem_description: &str,
-        current_status: &str,
-    ) -> Result<Value>;
-
     /// 创建子 Agent
     ///
     /// 返回新创建的 agent_id
@@ -116,54 +109,6 @@ impl LocalTool for SubmitWorkOrderTool {
             .await
     }
 }
-
-/// 主动求助工具
-pub struct RequestHelpTool;
-
-#[async_trait]
-impl LocalTool for RequestHelpTool {
-    fn name(&self) -> &str {
-        "request_help"
-    }
-
-    fn description(&self) -> &str {
-        "遇到无法解决的困难或歧义时，主动请求 CMA（上下文管理 Agent）干预。"
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "problem_description": {
-                    "type": "string",
-                    "description": "遇到的具体困难或阻塞原因"
-                },
-                "current_status": {
-                    "type": "string",
-                    "description": "当前已尝试的操作和进度状态"
-                }
-            },
-            "required": ["problem_description", "current_status"]
-        })
-    }
-
-    async fn call(&self, arguments: Value, context: ToolContext) -> Result<Value> {
-        let orchestrator = context.orchestrator.ok_or_else(|| {
-            crate::error::Error::WorkOrder(
-                "当前工具上下文中不存在总控接口，无法发起求助".to_string(),
-            )
-        })?;
-
-        let problem = arguments["problem_description"]
-            .as_str()
-            .unwrap_or_default();
-        let status = arguments["current_status"].as_str().unwrap_or_default();
-
-        orchestrator.submit_help_work_order(problem, status).await
-    }
-}
-
-// ==================== Downward Control Tools ====================
 
 /// 创建子 Agent 工具
 pub struct SpawnSubAgentTool;

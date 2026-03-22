@@ -567,10 +567,6 @@ Remember: Your goal is to make the conversation manageable while preserving crit
             "trim_messages".to_string(),
             crate::tool_mask::types::FsPermission::ReadWrite,
         );
-        tool_mask.set_local_permission(
-            "request_help".to_string(),
-            crate::tool_mask::types::FsPermission::ReadOnly,
-        );
 
         let llm_config = crate::agent::LlmConfig::new("default".to_string());
 
@@ -723,7 +719,6 @@ impl OrchestrationInterface for OrchestrationProvider {
     ) -> Result<Value> {
         let orch = self.orchestrator.read().await;
 
-        // 构造 PLAN.md 规范要求的工单内容
         let work_order_content = json!({
             "completed_details": completed_details,
             "related_files": related_files,
@@ -735,32 +730,10 @@ impl OrchestrationInterface for OrchestrationProvider {
             "Work order (Report) submitted via tool"
         );
 
-        // 在 Phase 5 中，这里会触发真正的工单发送逻辑。
-        // 目前返回格式化的 JSON 以供 Agent 确认。
         Ok(json!({
             "status": "submitted",
             "type": "report",
             "work_order": work_order_content
-        }))
-    }
-
-    async fn submit_help_work_order(
-        &self,
-        problem_description: &str,
-        current_status: &str,
-    ) -> Result<Value> {
-        let orch = self.orchestrator.read().await;
-
-        info!(
-            orchestrator_id = %orch.id,
-            "Work order (Help) submitted via tool"
-        );
-
-        Ok(json!({
-            "status": "submitted",
-            "type": "help",
-            "problem": problem_description,
-            "current_status": current_status
         }))
     }
 
